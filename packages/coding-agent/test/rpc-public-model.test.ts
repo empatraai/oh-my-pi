@@ -7,6 +7,7 @@ describe("RPC public model serialization", () => {
 		const authorization = "Bearer runtime-secret";
 		const apiKey = "provider-api-key";
 		const nestedToken = "nested-transport-token";
+		const signingKey = "private-signing-key";
 		const model = {
 			id: "empatra-test",
 			identity: { class: "openai", family: "gpt" },
@@ -28,6 +29,7 @@ describe("RPC public model serialization", () => {
 					nested: {
 						Authorization: authorization,
 						apiKey,
+						signingKey,
 						maxTokens: 4_096,
 					},
 				},
@@ -51,6 +53,7 @@ describe("RPC public model serialization", () => {
 		expect(response).not.toContain(authorization);
 		expect(response).not.toContain(apiKey);
 		expect(response).not.toContain(nestedToken);
+		expect(response).not.toContain(signingKey);
 		expect(response).not.toContain("headers");
 		expect(response).not.toContain("apiKey");
 		expect(response).not.toContain("credentials");
@@ -59,7 +62,7 @@ describe("RPC public model serialization", () => {
 			name: "Empatra Test",
 			provider: "empatra-gateway",
 			api: "openai-responses",
-			baseUrl: "https://example.test/v1",
+			baseUrl: "https://example.test",
 			reasoning: true,
 			input: ["text", "image"],
 			supportsTools: true,

@@ -120,11 +120,14 @@ const RPC_SECRET_FIELD_PARTS = new Set([
 	"auth",
 	"authentication",
 	"authorization",
+	"bearer",
 	"cookie",
 	"credential",
 	"credentials",
 	"header",
 	"headers",
+	"jwt",
+	"oauth",
 	"password",
 	"secret",
 	"token",
@@ -137,7 +140,13 @@ function isRpcSecretField(key: string): boolean {
 		.split(/[^a-z0-9]+/)
 		.filter(Boolean);
 	if (parts.some(part => RPC_SECRET_FIELD_PARTS.has(part))) return true;
-	return parts.some((part, index) => part === "api" && parts[index + 1] === "key");
+	return parts.some(
+		(part, index) =>
+			part === "key" &&
+			["access", "api", "client", "encryption", "private", "secret", "session", "signing"].includes(
+				parts[index - 1] ?? "",
+			),
+	);
 }
 
 function sanitizeRpcPublicMetadata(value: unknown, seen = new WeakSet<object>()): unknown {
@@ -162,13 +171,9 @@ function sanitizeRpcPublicMetadata(value: unknown, seen = new WeakSet<object>())
 function sanitizeRpcPublicBaseUrl(baseUrl: string): string {
 	try {
 		const url = new URL(baseUrl);
-		const containsPrivateComponents = Boolean(url.username || url.password || url.search || url.hash);
-		if (!containsPrivateComponents) return baseUrl;
-		url.username = "";
-		url.password = "";
-		url.search = "";
-		url.hash = "";
-		return url.toString();
+		// Path segments can also embed tenant credentials or signed routing
+		// capabilities. RPC clients only need the public provider origin.
+		return url.origin;
 	} catch {
 		// Invalid provider URLs are not useful to an RPC host and may be arbitrary
 		// secret-bearing configuration. Fail closed instead of echoing them.

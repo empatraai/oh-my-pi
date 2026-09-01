@@ -1603,7 +1603,7 @@ export async function runRootCommand(
 				lightTheme: settingsInstance.get("theme.light"),
 			},
 		});
-		setStartupComposerLspServers(discoverStartupLspServers(cwd, "connecting"));
+		setStartupComposerLspServers(parsedArgs.empatraHost ? [] : discoverStartupLspServers(cwd, "connecting"));
 
 		let scopedModels = await logger.time(
 			"resolveModelScope",
@@ -1806,7 +1806,7 @@ export async function runRootCommand(
 			}
 		}
 		await pluginPreloadPromise;
-		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
+		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES && !parsedArgs.empatraHost) {
 			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
 		}
 
