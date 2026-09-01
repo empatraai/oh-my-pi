@@ -62,6 +62,9 @@ export const launchHelp = {
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
 		"no-lsp": Flags.boolean({ description: "Disable LSP tools, formatting, and diagnostics" }),
 		"no-pty": Flags.boolean({ description: "Disable PTY-based interactive bash execution" }),
+		"empatra-host": Flags.boolean({
+			description: "Run the isolated Empatra Studio host profile (requires --mode rpc-ui)",
+		}),
 		tools: Flags.string({ description: "Comma-separated list of tools to enable (default: all)" }),
 		thinking: Flags.string({
 			description: `Set thinking level: ${CLI_THINKING_LEVELS.join(", ")}`,

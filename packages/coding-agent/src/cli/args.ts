@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { $env, APP_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
+import type { CreateAgentSessionOptions } from "../sdk";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -68,6 +69,7 @@ export interface Args {
 	noTools?: boolean;
 	noLsp?: boolean;
 	noPty?: boolean;
+	empatraHost?: boolean;
 	hooks?: string[];
 	extensions?: string[];
 	trustedExtensions?: string[];
@@ -252,6 +254,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noLsp = true;
 		} else if (arg === "--no-pty") {
 			result.noPty = true;
+		} else if (arg === "--empatra-host") {
+			result.empatraHost = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
 		} else if (arg === "--advisor") {
@@ -329,7 +333,72 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 	}
 
-	return result;
+	return applyEmpatraHostPolicy(result);
+}
+
+/**
+ * Apply the fail-closed launch policy used by the future Empatra Studio host.
+ *
+ * The Electron adapter will gain an explicit allowlist contract separately;
+ * until then, host mode rejects every CLI escape hatch that could load ambient
+ * code and forces the safest available approval and discovery settings.
+ */
+export function applyEmpatraHostPolicy(args: Args): Args {
+	if (!args.empatraHost) return args;
+	if (args.mode !== "rpc-ui") {
+		throw new CliUsageError("--empatra-host requires --mode rpc-ui");
+	}
+	if (args.autoApprove || args.approvalMode === "write" || args.approvalMode === "yolo") {
+		throw new CliUsageError("--empatra-host does not allow automatic or reduced tool approval");
+	}
+
+	const forbiddenInputs: Array<[string, unknown]> = [
+		["--extension/-e", args.extensions],
+		["--hook", args.hooks],
+		["--trusted-extension", args.trustedExtensions],
+		["--plugin-dir", args.pluginDirs],
+		["--skills", args.skills],
+	];
+	const forbidden = forbiddenInputs.find(([, value]) => value !== undefined)?.[0];
+	if (forbidden) {
+		throw new CliUsageError(`--empatra-host does not allow ${forbidden}; host allowlists are not implemented yet`);
+	}
+
+	return {
+		...args,
+		noExtensions: true,
+		noSkills: true,
+		noRules: true,
+		noLsp: true,
+		noPty: true,
+		noTitle: true,
+		autoApprove: false,
+		approvalMode: "always-ask",
+	};
+}
+
+/** Enforce the non-discovering SDK surface for Empatra Studio host sessions. */
+export function applyEmpatraHostSessionPolicy(
+	parsed: Pick<Args, "empatraHost" | "tools">,
+	options: CreateAgentSessionOptions,
+): void {
+	if (!parsed.empatraHost) return;
+	options.disableExtensionDiscovery = true;
+	options.additionalExtensionPaths = [];
+	options.preloadedCustomToolPaths = [];
+	options.skills = [];
+	options.rules = [];
+	options.contextFiles = [];
+	options.promptTemplates = [];
+	options.slashCommands = [];
+	options.enableMCP = false;
+	options.enableIrc = false;
+	options.enableLsp = false;
+	options.restrictToolNames = true;
+	// Start with no executable tools. Electron main must pass an explicit
+	// `--tools` allowlist once its approval and sandbox contract is ready.
+	options.toolNames = parsed.tools ?? [];
+	options.autoApprove = false;
 }
 
 /** Reject requested tool names absent from the fully discovered session registry. */

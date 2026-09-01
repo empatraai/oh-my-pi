@@ -24,7 +24,13 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
-import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
+import {
+	type Args,
+	applyEmpatraHostPolicy,
+	applyEmpatraHostSessionPolicy,
+	reportUnrecognizedFlags,
+	validateToolNames,
+} from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -1095,9 +1101,10 @@ export async function buildSessionOptions(
 	}
 
 	// Auto-discover SYSTEM.md if no CLI system prompt provided
-	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
-	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
-	const titleSystemPromptSource = discoverTitleSystemPromptFile();
+	const systemPromptSource = parsed.systemPrompt ?? (parsed.empatraHost ? undefined : discoverSystemPromptFile());
+	const appendPromptSource =
+		parsed.appendSystemPrompt ?? (parsed.empatraHost ? undefined : discoverAppendSystemPromptFile());
+	const titleSystemPromptSource = parsed.empatraHost ? undefined : discoverTitleSystemPromptFile();
 	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt] = await Promise.all([
 		resolvePromptInput(systemPromptSource, "system prompt"),
 		resolvePromptInput(appendPromptSource, "append system prompt"),
@@ -1369,6 +1376,7 @@ export async function buildSessionOptions(
 		}
 	}
 
+	applyEmpatraHostSessionPolicy(parsed, options);
 	return options;
 }
 
@@ -1391,11 +1399,13 @@ export async function runRootCommand(
 	logger.startTiming();
 	startStartupWatchdog();
 	try {
+		// Re-apply the pure policy at the execution boundary so SDK/programmatic
+		// callers cannot bypass the same validation performed by parseArgs().
+		const parsedArgs = applyEmpatraHostPolicy(parsed);
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
 		await logger.time("initTheme:initial", ensureTheme);
 
-		const parsedArgs = parsed;
 		try {
 			await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 		} catch (error: unknown) {
@@ -1437,8 +1447,9 @@ export async function runRootCommand(
 		// Kick off plugin-root preload in parallel with the remaining startup work.
 		// Awaited later (before extension/skill discovery in createAgentSession needs it).
 		const home = os.homedir();
-		const pluginPreloadPromise =
-			parsedArgs.pluginDirs && parsedArgs.pluginDirs.length > 0
+		const pluginPreloadPromise = parsedArgs.empatraHost
+			? Promise.resolve()
+			: parsedArgs.pluginDirs && parsedArgs.pluginDirs.length > 0
 				? logger.time("injectPluginDirRoots", injectPluginDirRoots, home, parsedArgs.pluginDirs, getProjectDir())
 				: logger.time("preloadPluginRoots", preloadPluginRoots, home, getProjectDir());
 		// Mark the promise as handled so a synchronous failure does not surface as an unhandled-rejection
@@ -1799,11 +1810,13 @@ export async function runRootCommand(
 			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
 		}
 
-		scheduleMarketplaceAutoUpdate({
-			autoUpdate: settingsInstance.get("marketplace.autoUpdate"),
-			resolveActiveProjectRegistryPath,
-			clearPluginRootsCache: clearPluginRootsAndCaches,
-		});
+		if (!parsedArgs.empatraHost) {
+			scheduleMarketplaceAutoUpdate({
+				autoUpdate: settingsInstance.get("marketplace.autoUpdate"),
+				resolveActiveProjectRegistryPath,
+				clearPluginRootsCache: clearPluginRootsAndCaches,
+			});
+		}
 
 		const sessionOptions = await logger.time(
 			"buildSessionOptions",
