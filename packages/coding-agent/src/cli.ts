@@ -344,8 +344,8 @@ export async function runCli(argv: string[]): Promise<void> {
 	let resolvedArgv = argv;
 	let empatraHostRequested = false;
 	try {
-		empatraHostRequested = validateEmpatraHostBootstrap(resolvedArgv);
 		const extracted = extractProfileFlags(resolvedArgv);
+		empatraHostRequested = validateEmpatraHostBootstrap(extracted);
 		resolvedArgv = extracted.argv;
 		if (extracted.profile !== undefined) {
 			setProfile(extracted.profile);

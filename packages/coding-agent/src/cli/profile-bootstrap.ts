@@ -57,19 +57,20 @@ export interface ProfileBootstrapResult {
 	argv: string[];
 	profile?: string;
 	aliasName?: string;
+	empatraHostRequested?: true;
 }
 
 /** Reject profile/bootstrap side effects before host policy can be stripped from argv. */
 export function validateEmpatraHostBootstrap(
-	argv: readonly string[],
+	bootstrap: ProfileBootstrapResult,
 	environment: NodeJS.ProcessEnv = process.env,
 ): boolean {
-	const enabled = argv.includes("--empatra-host");
+	const enabled = bootstrap.empatraHostRequested === true;
 	if (!enabled) return false;
-	if (argv.some(arg => arg === "--profile" || arg.startsWith("--profile="))) {
+	if (bootstrap.profile !== undefined) {
 		throw new Error("--empatra-host does not allow --profile");
 	}
-	if (argv.some(arg => arg === "--alias" || arg.startsWith("--alias="))) {
+	if (bootstrap.aliasName !== undefined) {
 		throw new Error("--empatra-host does not allow --alias");
 	}
 	if (environment.OMP_PROFILE?.trim() || environment.PI_PROFILE?.trim()) {
@@ -97,6 +98,7 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 	const stripped: string[] = [];
 	let profile: string | undefined;
 	let aliasName: string | undefined;
+	let empatraHostRequested = false;
 	let passThrough = false;
 	let sawSubcommand = false;
 	let canDispatchSubcommand = true;
@@ -123,6 +125,12 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 			passThrough = true;
 			stripped.push(arg);
 			continue;
+		}
+		if (arg.startsWith("--empatra-host=")) {
+			throw new Error("--empatra-host does not take a value");
+		}
+		if (arg === "--empatra-host") {
+			empatraHostRequested = true;
 		}
 
 		if (arg === "--profile") {
@@ -244,5 +252,10 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 		stripped.push(arg);
 	}
 
-	return { argv: stripped, profile, aliasName };
+	return {
+		argv: stripped,
+		profile,
+		aliasName,
+		...(empatraHostRequested ? { empatraHostRequested: true as const } : {}),
+	};
 }

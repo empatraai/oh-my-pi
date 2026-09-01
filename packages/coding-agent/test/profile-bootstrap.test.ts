@@ -5,20 +5,30 @@ import { extractProfileFlags, validateEmpatraHostBootstrap } from "../src/cli/pr
 
 describe("validateEmpatraHostBootstrap", () => {
 	it("rejects profile and alias side effects before launch parsing", () => {
-		expect(() => validateEmpatraHostBootstrap(["--empatra-host", "--profile", "work"], {})).toThrow(
-			"does not allow --profile",
-		);
-		expect(() => validateEmpatraHostBootstrap(["--empatra-host", "--alias=omp-work"], {})).toThrow(
-			"does not allow --alias",
-		);
+		expect(() =>
+			validateEmpatraHostBootstrap(extractProfileFlags(["--empatra-host", "--profile", "work"]), {}),
+		).toThrow("does not allow --profile");
+		expect(() =>
+			validateEmpatraHostBootstrap(extractProfileFlags(["--empatra-host", "--alias=omp-work"]), {}),
+		).toThrow("does not allow --alias");
 	});
 
 	it("rejects inherited profiles and reports whether host mode is active", () => {
-		expect(() => validateEmpatraHostBootstrap(["--empatra-host"], { OMP_PROFILE: "work" })).toThrow(
-			"does not allow inherited",
+		expect(() =>
+			validateEmpatraHostBootstrap(extractProfileFlags(["--empatra-host"]), { OMP_PROFILE: "work" }),
+		).toThrow("does not allow inherited");
+		expect(validateEmpatraHostBootstrap(extractProfileFlags(["--empatra-host"]), {})).toBe(true);
+		expect(validateEmpatraHostBootstrap(extractProfileFlags(["--version"]), { OMP_PROFILE: "work" })).toBe(false);
+	});
+
+	it("recognizes host mode only as a real valueless launch flag", () => {
+		expect(() => extractProfileFlags(["--empatra-host=true", "--profile", "work"])).toThrow("does not take a value");
+		expect(
+			validateEmpatraHostBootstrap(extractProfileFlags(["--system-prompt", "--empatra-host", "--profile", "work"])),
+		).toBe(false);
+		expect(validateEmpatraHostBootstrap(extractProfileFlags(["--", "--empatra-host", "--profile", "work"]))).toBe(
+			false,
 		);
-		expect(validateEmpatraHostBootstrap(["--empatra-host"], {})).toBe(true);
-		expect(validateEmpatraHostBootstrap(["--version"], { OMP_PROFILE: "work" })).toBe(false);
 	});
 });
 

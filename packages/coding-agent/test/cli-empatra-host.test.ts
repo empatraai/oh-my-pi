@@ -50,6 +50,11 @@ describe("--empatra-host", () => {
 		expect(parsed.approvalMode).toBe("always-ask");
 	});
 
+	it("rejects boolean assignment syntax for the valueless host flag", () => {
+		expect(() => parseArgs(["--empatra-host=true", ...HOST_ARGS.slice(1)])).toThrow("does not take a value");
+		expect(() => parseArgs(["--empatra-host=false", ...HOST_ARGS.slice(1)])).toThrow("does not take a value");
+	});
+
 	it("does not mutate the caller's parsed arguments", () => {
 		const input = {
 			...parseArgs([

@@ -255,6 +255,9 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		} else if (arg === "--no-pty") {
 			result.noPty = true;
 		} else if (arg === "--empatra-host") {
+			if (equalsValueIndex !== -1) {
+				throw new CliUsageError("--empatra-host does not take a value");
+			}
 			result.empatraHost = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
