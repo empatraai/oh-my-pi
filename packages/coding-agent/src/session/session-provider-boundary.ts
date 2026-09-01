@@ -61,7 +61,7 @@ export class SessionProviderBoundary {
 				const label = `Image #${index + 1}`;
 				const uri = `attachment://${index + 1}`;
 				try {
-					const sourcePath = this.#host.sessionManager.putBlobSync(Buffer.from(image.data, "base64"), {
+					const sourcePath = this.#host.sessionManager.materializeBlobSync(Buffer.from(image.data, "base64"), {
 						extension: blobExtensionForImageMimeType(image.mimeType),
 					}).displayPath;
 					return [{ label, uri, image, sourcePath }];

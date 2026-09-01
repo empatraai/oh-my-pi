@@ -20,7 +20,14 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
-import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
+import {
+	type BlobGarbageCollectionOptions,
+	type BlobGarbageCollectionResult,
+	type BlobPublicationCapture,
+	type BlobPutOptions,
+	type BlobPutResult,
+	BlobStore,
+} from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
@@ -543,6 +550,7 @@ export class SessionManager {
 	#adoptedArtifactManager: ArtifactManager | null = null;
 	#inMemoryArtifacts: Map<string, string> | null = null;
 	#inMemoryArtifactCounter = 0;
+	readonly #fileBlobGarbageCollectionEnabled: boolean;
 
 	#suppressBreadcrumb = false;
 	/**
@@ -555,12 +563,24 @@ export class SessionManager {
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
 
-	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
+	private constructor(
+		cwd: string,
+		sessionDir: string,
+		persist: boolean,
+		storage: SessionStorage,
+		blobDir: string = getBlobsDir(),
+		enableFileBlobGarbageCollection = false,
+	) {
 		this.#cwd = cwd;
 		this.#sessionDir = sessionDir;
 		this.#persist = persist;
 		this.#storage = storage;
-		this.#blobs = new BlobStore(getBlobsDir());
+		this.#blobs = new BlobStore(blobDir);
+		if (enableFileBlobGarbageCollection && !(storage instanceof FileSessionStorage)) {
+			throw new Error("Blob garbage collection requires authoritative FileSessionStorage");
+		}
+		this.#fileBlobGarbageCollectionEnabled = enableFileBlobGarbageCollection;
+		if (this.#fileBlobGarbageCollectionEnabled) this.#blobs.registerSessionRoot(sessionDir);
 
 		if (persist && sessionDir) this.#storage.ensureDirSync(sessionDir);
 	}
@@ -743,11 +763,20 @@ export class SessionManager {
 						new Error("Session file disappeared during authoritative repair."),
 					]);
 				}
-				const body = this.#fileBody();
+				const publication = this.#fileBody();
+				const body = publication.value;
+				let publicationSettled = false;
 				try {
 					await this.#storage.writeTextAtomic(sessionFile, body, {
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
 					});
+					if (this.#released || this.#diskEpoch !== epoch) {
+						publication.abandon();
+						publicationSettled = true;
+						throw new Error("Authoritative session repair was superseded before publication");
+					}
+					publication.commit();
+					publicationSettled = true;
 				} catch (error) {
 					const recoveryErrors = [toError(error)];
 					try {
@@ -763,9 +792,15 @@ export class SessionManager {
 						throw this.#latchIndeterminate(operationError, recoveryErrors);
 					}
 					if (actual !== body) {
+						publication.abandon();
+						publicationSettled = true;
 						recoveryErrors.push(new Error("Authoritative session repair did not match durable storage."));
 						throw this.#latchIndeterminate(operationError, recoveryErrors);
 					}
+					publication.commit();
+					publicationSettled = true;
+				} finally {
+					if (!publicationSettled) publication.abandon();
 				}
 				if (this.#diskEpoch !== epoch) {
 					throw this.#latchIndeterminate(operationError, [
@@ -798,8 +833,12 @@ export class SessionManager {
 		return this.#writer;
 	}
 
-	#lineFor(entry: FileEntry): string {
+	#serializedLine(entry: FileEntry): string {
 		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs)) ?? "null"}\n`;
+	}
+
+	#lineFor(entry: FileEntry): BlobPublicationCapture<string> {
+		return this.#blobs.capturePublications(() => this.#serializedLine(entry));
 	}
 
 	#titleSlotLine(): string {
@@ -810,11 +849,13 @@ export class SessionManager {
 		});
 	}
 
-	#fileBody(): string {
-		let body = this.#titleSlotLine();
-		body += this.#lineFor(this.#header);
-		for (const entry of this.#entries) body += this.#lineFor(entry);
-		return body;
+	#fileBody(): BlobPublicationCapture<string> {
+		return this.#blobs.capturePublications(() => {
+			let body = this.#titleSlotLine();
+			body += this.#serializedLine(this.#header);
+			for (const entry of this.#entries) body += this.#serializedLine(entry);
+			return body;
+		});
 	}
 
 	#historyContainsAssistantMessage(): boolean {
@@ -855,12 +896,15 @@ export class SessionManager {
 		const targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
 
+		let publication: BlobPublicationCapture<string> | undefined;
 		try {
-			const body = this.#fileBody();
+			publication = this.#fileBody();
+			const body = publication.value;
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
 			this.#storage.writeTextSync(targetPath, body);
+			publication.commit();
 			this.#clearDiskError();
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
@@ -878,6 +922,7 @@ export class SessionManager {
 				this.#hasTitleSlot = true;
 			}
 		} catch (err) {
+			publication?.abandon();
 			this.#noteDiskFailure(err);
 		}
 	}
@@ -929,10 +974,20 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
-				await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
-					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
-				});
-				if (this.#diskEpoch !== epoch) return false;
+				const publication = this.#fileBody();
+				try {
+					await this.#storage.writeTextAtomic(sessionFile, publication.value, {
+						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+					});
+					if (this.#released || this.#diskEpoch !== epoch) {
+						publication.abandon();
+						return false;
+					}
+					publication.commit();
+				} catch (error) {
+					publication.abandon();
+					throw error;
+				}
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -1003,19 +1058,27 @@ export class SessionManager {
 		// to the OS page cache before return.
 		// A mid-close writer leaves `#writer` undefined, so `#appendWriter` simply
 		// opens a fresh append handle and the entry still lands.
+		let publication: BlobPublicationCapture<string> | undefined;
 		try {
 			const writer = this.#appendWriter();
-			const line = this.#lineFor(entry);
+			publication = this.#lineFor(entry);
+			const line = publication.value;
 			if (writer.appendSync) {
 				writer.appendSync(line);
+				publication.commit();
 			} else {
-				void writer.append(line).catch(err => {
-					this.#fileIsCurrent = false;
-					this.#rewriteRequired = true;
-					this.#noteDiskFailure(err);
-				});
+				void writer
+					.append(line)
+					.then(() => publication?.commit())
+					.catch(err => {
+						publication?.abandon();
+						this.#fileIsCurrent = false;
+						this.#rewriteRequired = true;
+						this.#noteDiskFailure(err);
+					});
 			}
 		} catch (err) {
+			publication?.abandon();
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
 			this.#noteDiskFailure(err);
@@ -1057,17 +1120,23 @@ export class SessionManager {
 		}
 
 		const epoch = this.#diskEpoch;
-		const line = this.#lineFor(entry);
+		const publication = this.#lineFor(entry);
+		const line = publication.value;
 		await this.#scheduleDiskWork(
 			async () => {
-				if (this.#released) return;
+				if (this.#released) {
+					publication.abandon();
+					return;
+				}
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
 				try {
 					await this.#appendWriter().append(line);
+					publication.commit();
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
+					publication.abandon();
 					if (!(await this.#runFencedAtomicRewrite(epoch))) return;
 					this.#clearDiskError();
 					this.#fileIsCurrent = true;
@@ -1285,6 +1354,38 @@ export class SessionManager {
 		return this.#blobs.putSync(data, options);
 	}
 
+	/** Materialize bytes already referenced by durable session state for read-only consumers. */
+	materializeBlobSync(data: Buffer, options?: BlobPutOptions): BlobPutResult {
+		return this.#blobs.putSync(data, { ...options, protectUntilDurable: false });
+	}
+
+	#blobGarbageCollectionRoots(): string[] {
+		if (!this.#fileBlobGarbageCollectionEnabled) {
+			throw new Error("Blob garbage collection requires explicit single-writer file-storage authority");
+		}
+		return [this.#sessionDir];
+	}
+
+	/** Run one explicit bounded mark-and-sweep pass over the shared session CAS. */
+	async collectBlobGarbage(
+		options: Omit<BlobGarbageCollectionOptions, "sessionRoots"> = {},
+	): Promise<BlobGarbageCollectionResult> {
+		return await this.#blobs.collectGarbage({
+			...options,
+			sessionRoots: this.#blobGarbageCollectionRoots(),
+		});
+	}
+
+	scheduleBlobGarbageCollection(): void {
+		if (!this.#fileBlobGarbageCollectionEnabled) return;
+		this.#blobs.scheduleGarbageCollection({ sessionRoots: this.#blobGarbageCollectionRoots() });
+	}
+
+	/** Wait for coalesced lifecycle GC before releasing the host process lock. */
+	drainBlobGarbageCollection(): Promise<void> {
+		return this.#blobs.drainScheduledGarbageCollection();
+	}
+
 	captureState(): SessionManagerStateSnapshot {
 		return {
 			cwd: this.#cwd,
@@ -1316,7 +1417,14 @@ export class SessionManager {
 	 */
 	cloneCurrentSession(options?: { persist?: boolean }): SessionManager {
 		const persist = options?.persist ?? this.#persist;
-		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
+		const clone = new SessionManager(
+			this.#cwd,
+			this.#sessionDir,
+			persist,
+			this.#storage,
+			this.#blobs.dir,
+			this.#fileBlobGarbageCollectionEnabled,
+		);
 		clone.#suppressBreadcrumb = true;
 		clone.restoreState(this.captureState());
 		if (!persist) {
@@ -1474,6 +1582,7 @@ export class SessionManager {
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
 		}
+		this.scheduleBlobGarbageCollection();
 	}
 
 	/**
@@ -1836,6 +1945,7 @@ export class SessionManager {
 			this.#forceFileCreation = false;
 			this.#hasTitleSlot = false;
 			this.#draftOnlySessionCleanupArmed = false;
+			this.scheduleBlobGarbageCollection();
 		} catch (err) {
 			if (!isEnoent(err)) {
 				logger.warn("Failed to drop empty session on close", { sessionFile, error: String(err) });
@@ -2648,6 +2758,7 @@ export class SessionManager {
 			discardedEntryId: entryId,
 		});
 		await this.rewriteEntries();
+		this.scheduleBlobGarbageCollection();
 	}
 
 	/** Like branch(), but also records a branch_summary of the abandoned path. */
@@ -2756,9 +2867,21 @@ export class SessionManager {
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
 	 */
-	static create(cwd: string, sessionDir?: string, storage: SessionStorage = new FileSessionStorage()): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: { blobDir?: string; enableFileBlobGarbageCollection?: boolean },
+	): SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		const manager = new SessionManager(cwd, dir, true, storage);
+		const manager = new SessionManager(
+			cwd,
+			dir,
+			true,
+			storage,
+			options?.blobDir,
+			options?.enableFileBlobGarbageCollection,
+		);
 		manager.#resetToNewSession();
 		return manager;
 	}
@@ -2799,10 +2922,23 @@ export class SessionManager {
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { copyArtifacts?: boolean; suppressBreadcrumb?: boolean; sessionFile?: string },
+		options?: {
+			blobDir?: string;
+			copyArtifacts?: boolean;
+			enableFileBlobGarbageCollection?: boolean;
+			suppressBreadcrumb?: boolean;
+			sessionFile?: string;
+		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		const manager = new SessionManager(cwd, dir, true, storage);
+		const manager = new SessionManager(
+			cwd,
+			dir,
+			true,
+			storage,
+			options?.blobDir,
+			options?.enableFileBlobGarbageCollection,
+		);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 
 		const sourceEntries = structuredClone(await loadEntriesFromFile(sourcePath, storage)) as FileEntry[];
@@ -2847,7 +2983,12 @@ export class SessionManager {
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
+		options?: {
+			blobDir?: string;
+			enableFileBlobGarbageCollection?: boolean;
+			initialCwd?: string;
+			suppressBreadcrumb?: boolean;
+		},
 	): Promise<SessionManager> {
 		const loaded = await loadSessionFile(filePath, storage);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
@@ -2865,7 +3006,14 @@ export class SessionManager {
 			(recordedCwd && !recordedCwdUsable
 				? SessionManager.getDefaultSessionDir(cwd, undefined, storage)
 				: path.dirname(path.resolve(filePath)));
-		const manager = new SessionManager(cwd, dir, true, storage);
+		const manager = new SessionManager(
+			cwd,
+			dir,
+			true,
+			storage,
+			options?.blobDir,
+			options?.enableFileBlobGarbageCollection,
+		);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 		await manager.#setSessionFile(filePath, loaded);
 		return manager;

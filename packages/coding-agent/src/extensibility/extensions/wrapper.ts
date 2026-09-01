@@ -24,7 +24,7 @@ import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
-import type { RegisteredTool, ToolCallEventResult } from "./types";
+import type { ExtensionUIApprovalContext, RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
  * Adapts a RegisteredTool into an AgentTool.
@@ -135,6 +135,120 @@ function approvalData(value: string): string {
 		.trim();
 	const truncated = truncateForPrompt(sanitized, 500);
 	return truncated.replace(/([\\`*_{}[\]()<>#+\-.!|])/g, "\\$1");
+}
+
+const MAX_APPROVAL_RAW_INPUT_BYTES = 16 * 1024;
+const REDACTED_APPROVAL_VALUE = "[REDACTED]";
+const APPROVAL_PREVIEW_ERROR = "Tool approval preview cannot be represented safely";
+const APPROVAL_PREVIEW_LIMIT_ERROR = "Tool approval preview exceeds the safe display limit";
+
+type JsonValue = boolean | null | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+function isSensitiveApprovalKey(key: string): boolean {
+	const words = key
+		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/u)
+		.filter(Boolean);
+	if (
+		words.some(word =>
+			[
+				"auth",
+				"authorization",
+				"cookie",
+				"credential",
+				"credentials",
+				"passwd",
+				"password",
+				"passphrase",
+				"secret",
+				"token",
+			].includes(word),
+		)
+	) {
+		return true;
+	}
+	return words.includes("key");
+}
+
+function redactSensitiveApprovalText(value: string): string {
+	return value
+		.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/giu, "$1[REDACTED]@")
+		.replace(
+			/\b(authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+/giu,
+			"$1: [REDACTED]",
+		)
+		.replace(
+			/\b(x-api-key|api-key|x-auth-token|authorization|proxy-authorization)\s*:\s*[^\r\n'"|&]+/giu,
+			"$1: [REDACTED]",
+		)
+		.replace(/\b(cookie|set-cookie)\s*:\s*[^\r\n'"|&]+/giu, "$1: [REDACTED]")
+		.replace(
+			/\b(api[_-]?key|auth|authorization|proxy[_-]?authorization|token|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|passphrase|client[_-]?secret|secret|credential(?:s)?|cookie)\s*=\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|]+)/giu,
+			"$1=[REDACTED]",
+		)
+		.replace(
+			/\b([A-Za-z_][A-Za-z0-9_]*(?:API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH|TOKEN|PASSWORD|PASSWD|PASSPHRASE|SECRET|CREDENTIAL|COOKIE)[A-Za-z0-9_]*\s*=\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|]+)/gu,
+			"$1[REDACTED]",
+		)
+		.replace(
+			/(--(?:api[-_]?key|authorization|token|access[-_]?token|refresh[-_]?token|password|passwd|passphrase|client[-_]?secret|secret|credential(?:s)?|cookie)(?:=|\s+))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|]+)/giu,
+			"$1[REDACTED]",
+		)
+		.replace(/\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/giu, "[REDACTED]")
+		.replace(/\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, REDACTED_APPROVAL_VALUE)
+		.replace(
+			/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{12,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})\b/gu,
+			REDACTED_APPROVAL_VALUE,
+		);
+}
+
+function redactApprovalValue(value: unknown): JsonValue {
+	if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+	if (typeof value === "string") return redactSensitiveApprovalText(value);
+	if (Array.isArray(value)) return value.map(redactApprovalValue);
+	if (typeof value !== "object") throw new Error(APPROVAL_PREVIEW_ERROR);
+	const redacted: { [key: string]: JsonValue } = {};
+	for (const [key, nested] of Object.entries(value)) {
+		redacted[key] = isSensitiveApprovalKey(key) ? REDACTED_APPROVAL_VALUE : redactApprovalValue(nested);
+	}
+	return redacted;
+}
+
+function createApprovalContext(value: unknown, toolCallId: string, toolName: string): ExtensionUIApprovalContext {
+	try {
+		const serialized = JSON.stringify(value);
+		if (serialized === undefined) throw new Error(APPROVAL_PREVIEW_ERROR);
+		const parsed: unknown = JSON.parse(serialized);
+		const rawInput = JSON.stringify(redactApprovalValue(parsed));
+		if (new TextEncoder().encode(rawInput).byteLength > MAX_APPROVAL_RAW_INPUT_BYTES) {
+			throw new Error(APPROVAL_PREVIEW_LIMIT_ERROR);
+		}
+		return {
+			inputDigest: new Bun.CryptoHasher("sha256").update(serialized).digest("hex").toLowerCase(),
+			rawInput,
+			toolCallId,
+			toolName,
+		};
+	} catch (error) {
+		if (error instanceof Error && error.message === APPROVAL_PREVIEW_LIMIT_ERROR) throw error;
+		throw new Error(APPROVAL_PREVIEW_ERROR);
+	}
+}
+
+function assertApprovedInputUnchanged(value: unknown, digest: string): void {
+	let serialized: string | undefined;
+	try {
+		serialized = JSON.stringify(value);
+	} catch {
+		throw new Error("Tool input changed after approval");
+	}
+	if (
+		serialized === undefined ||
+		new Bun.CryptoHasher("sha256").update(serialized).digest("hex").toLowerCase() !== digest
+	) {
+		throw new Error("Tool input changed after approval");
+	}
 }
 
 function safetyCheckLines(checks: readonly ComputerSafetyCheck[]): string[] {
@@ -266,7 +380,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
 		};
-
+		let approvedInputDigest: string | undefined;
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
 			if (
@@ -329,7 +443,17 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					: basePrompt;
 			let choice: string | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				const approvalContext = createApprovalContext(effectiveParams, toolCallId, this.tool.name);
+				approvedInputDigest = approvalContext.inputDigest;
+				const safePrompt = redactSensitiveApprovalText(safetyPrompt);
+				if (new TextEncoder().encode(safePrompt).byteLength > MAX_APPROVAL_RAW_INPUT_BYTES) {
+					throw new Error(APPROVAL_PREVIEW_LIMIT_ERROR);
+				}
+				choice = await uiContext.select(safePrompt, ["Approve", "Deny"], {
+					...(signal ? { signal } : {}),
+					internalApprovalContext: approvalContext,
+				});
+				if (choice === "Approve") assertApprovedInputUnchanged(effectiveParams, approvedInputDigest);
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;
@@ -344,7 +468,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				context.providerSafetyApproved = true;
 			}
 		}
-
+		if (approvedInputDigest) assertApprovedInputUnchanged(effectiveParams, approvedInputDigest);
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;

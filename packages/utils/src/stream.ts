@@ -5,12 +5,27 @@ import { parseStreamingJson } from "./json-parse";
 
 const LF = 0x0a;
 
-export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
+export class LineTooLongError extends RangeError {
+	readonly maxLineBytes: number;
+
+	constructor(maxLineBytes: number) {
+		super(`Line exceeds the ${maxLineBytes}-byte limit`);
+		this.name = "LineTooLongError";
+		this.maxLineBytes = maxLineBytes;
+	}
+}
+
+export async function* readLines(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	maxLineBytes = Number.POSITIVE_INFINITY,
+): AsyncGenerator<Uint8Array> {
+	if (!(maxLineBytes > 0)) throw new RangeError("maxLineBytes must be positive");
 	const buffer = new ConcatSink();
 	const source = abortableSource(stream, signal);
 	try {
 		for await (const chunk of source) {
-			for (const line of buffer.appendAndFlushLines(chunk)) {
+			for (const line of buffer.appendAndFlushLines(chunk, maxLineBytes)) {
 				yield line;
 			}
 		}
@@ -109,16 +124,18 @@ class ConcatSink {
 		this.#length = 0;
 	}
 
-	*appendAndFlushLines(chunk: Uint8Array) {
+	*appendAndFlushLines(chunk: Uint8Array, maxLineBytes: number) {
 		let pos = 0;
 		while (pos < chunk.length) {
 			const nl = chunk.indexOf(LF, pos);
 			if (nl === -1) {
+				if (this.#length + chunk.length - pos > maxLineBytes) throw new LineTooLongError(maxLineBytes);
 				this.append(chunk.subarray(pos));
 				return;
 			}
 			const suffix = chunk.subarray(pos, nl);
 			pos = nl + 1;
+			if (this.#length + suffix.length > maxLineBytes) throw new LineTooLongError(maxLineBytes);
 			if (this.isEmpty) {
 				yield suffix;
 			} else {

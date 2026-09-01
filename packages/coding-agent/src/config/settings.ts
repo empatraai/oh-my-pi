@@ -568,9 +568,9 @@ export class Settings {
 	 */
 	static isolated(
 		overrides: Partial<Record<SettingPath, unknown>> = {},
-		options: { storage?: AgentStorage | null } = {},
+		options: { agentDir?: string; cwd?: string; storage?: AgentStorage | null } = {},
 	): Settings {
-		const instance = new Settings({ inMemory: true, overrides });
+		const instance = new Settings({ agentDir: options.agentDir, cwd: options.cwd, inMemory: true, overrides });
 		instance.#storage = options.storage ?? null;
 		instance.#rebuildMerged();
 		return instance;

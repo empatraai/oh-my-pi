@@ -179,6 +179,16 @@ export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): 
 	return typeof option === "string" ? option : option.label;
 }
 
+/** Internal metadata used by headless hosts to turn a tool gate into an approval request. */
+export interface ExtensionUIApprovalContext {
+	/** Lowercase SHA-256 of the exact JSON serialization approved for execution. */
+	inputDigest: string;
+	/** Complete bounded display serialization after recursive credential redaction. Never raw tool input. */
+	rawInput: string;
+	toolCallId: string;
+	toolName: string;
+}
+
 /**
  * UI dialog options for extensions.
  */
@@ -203,6 +213,8 @@ export interface ExtensionUIDialogOptions {
 	onExternalEditor?: () => void;
 	/** Optional footer hint text rendered by interactive selector */
 	helpText?: string;
+	/** @internal Product-host approval identity. Interactive clients may ignore it. */
+	internalApprovalContext?: ExtensionUIApprovalContext;
 	/** Render a leading radio/checkbox marker before each markable option in
 	 *  select dialogs (matches the ask transcript). "radio" fills the cursor row
 	 *  for single-choice; "checkbox" reflects `checkedIndices` per row for

@@ -1,0 +1,1377 @@
+import * as path from "node:path";
+
+import { EmpatraHostProtocolError, EmpatraHostRegistryError } from "./errors";
+import type {
+	EmpatraHostApprovalResponse,
+	EmpatraHostInteractionRequest,
+	EmpatraHostUserInputResponse,
+} from "./interaction-broker";
+
+export const EMPATRA_HOST_PROTOCOL_VERSION = 4 as const;
+export const EMPATRA_HOST_MAX_FRAME_BYTES = 1024 * 1024;
+export const EMPATRA_HOST_MAX_MODELS = 1024;
+export const EMPATRA_HOST_MAX_WORKSPACE_ROOTS = 128;
+export const EMPATRA_HOST_MAX_HOST_TOOLS = 256;
+export const EMPATRA_HOST_MAX_HOST_TOOL_ARGUMENT_BYTES = 256 * 1024;
+export const EMPATRA_HOST_MAX_HOST_TOOL_RESULT_BYTES = 512 * 1024;
+export const EMPATRA_HOST_MAX_ASSISTANT_MESSAGES_PER_TURN = 256;
+export const EMPATRA_HOST_MAX_CONTENT_INDEX = 4095;
+export const EMPATRA_HOST_MAX_IMAGES = 16;
+export const EMPATRA_HOST_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const EMPATRA_HOST_MAX_IMAGE_BYTES_TOTAL = 64 * 1024 * 1024;
+export const EMPATRA_HOST_MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
+export const EMPATRA_HOST_THREAD_READ_TARGET_BYTES = 896 * 1024;
+
+const textEncoder = new TextEncoder();
+const CONTROL_CHARACTER = /\p{Cc}/u;
+const DISPLAY_NAME_SEPARATOR = /[\\/]+/u;
+
+export interface EmpatraHostModel {
+	api: "openai-responses";
+	contextWindow: number;
+	id: string;
+	input: ("image" | "text")[];
+	maxTokens: number;
+	name: string;
+	reasoning: boolean;
+	reasoningEfforts?: EmpatraHostReasoningEffort[];
+	supportsTools: boolean;
+}
+
+/**
+ * Product-owned, explicit subset of OMP thinking selectors. `none` maps to
+ * OMP's `off`; the host intentionally does not accept ambient OMP selectors.
+ */
+export type EmpatraHostReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type EmpatraHostImageMimeType = "image/gif" | "image/jpeg" | "image/png" | "image/webp";
+
+export interface EmpatraHostImageDescriptor {
+	byteLength: number;
+	detail?: "auto" | "high" | "low";
+	displayName?: string;
+	mimeType: EmpatraHostImageMimeType;
+	sha256: string;
+}
+
+export interface EmpatraHostProjectedImageBlock {
+	blockType: "image";
+	byteLength: number;
+	detail?: "auto" | "high" | "low";
+	displayName: string;
+	heightPixels?: number;
+	mimeType: EmpatraHostImageMimeType;
+	sha256: string;
+	widthPixels?: number;
+}
+
+export function sanitizeEmpatraHostImageDisplayName(value: string): string {
+	const leaf =
+		value
+			.normalize("NFKC")
+			.replaceAll(/\p{C}+/gu, " ")
+			.split(DISPLAY_NAME_SEPARATOR)
+			.at(-1)
+			?.trim() ?? "";
+	const sanitized = leaf.replaceAll(/\s+/gu, " ").slice(0, 160).trim();
+	return sanitized === "" || sanitized === "." || sanitized === ".." ? "Изображение" : sanitized;
+}
+
+export interface EmpatraHostInitializeCommand {
+	capability: string;
+	gatewayBaseUrl: string;
+	id: string;
+	models: EmpatraHostModel[];
+	protocolVersion: typeof EMPATRA_HOST_PROTOCOL_VERSION;
+	sessionDirectory: string;
+	type: "host_initialize";
+	workspaceRoots: string[];
+}
+
+export interface EmpatraHostThreadCreateCommand {
+	cwd: string;
+	id: string;
+	modelId: string;
+	operationId: string;
+	systemPrompt: string;
+	type: "thread_create";
+}
+
+export interface EmpatraHostThreadCreateAndStartCommand extends Omit<EmpatraHostThreadCreateCommand, "type"> {
+	images?: EmpatraHostImageDescriptor[];
+	message: string;
+	reasoningEffort?: EmpatraHostReasoningEffort | null;
+	turnId: string;
+	type: "thread_create_and_start";
+}
+
+export interface EmpatraHostThreadForkCommand {
+	cwd?: string;
+	id: string;
+	operationId: string;
+	threadId: string;
+	type: "thread_fork";
+}
+
+export interface EmpatraHostThreadForkAndStartCommand extends Omit<EmpatraHostThreadForkCommand, "type"> {
+	images?: EmpatraHostImageDescriptor[];
+	message: string;
+	reasoningEffort?: EmpatraHostReasoningEffort | null;
+	turnId: string;
+	type: "thread_fork_and_start";
+}
+
+export interface EmpatraHostThreadRollbackCommand {
+	id: string;
+	threadId: string;
+	turns: number;
+	type: "thread_rollback";
+}
+
+export interface EmpatraHostThreadCompactCommand {
+	id: string;
+	threadId: string;
+	type: "thread_compact";
+}
+
+export interface EmpatraHostThreadReadCommand {
+	cursor?: string;
+	id: string;
+	limit: number;
+	threadId: string;
+	type: "thread_read";
+}
+
+export interface EmpatraHostToolDefinition {
+	description: string;
+	hidden?: boolean;
+	label?: string;
+	loadMode?: "discoverable" | "essential";
+	name: string;
+	parameters: Record<string, unknown>;
+}
+
+export interface EmpatraHostToolsReplaceCommand {
+	catalogRevision: string;
+	id: string;
+	tools: EmpatraHostToolDefinition[];
+	type: "host_tools_replace";
+}
+
+export type EmpatraHostToolResultContent =
+	| Readonly<{ text: string; type: "text" }>
+	| Readonly<{ data: string; mimeType: string; type: "image" }>;
+
+export interface EmpatraHostToolResultValue {
+	content: EmpatraHostToolResultContent[];
+	details?: unknown;
+}
+
+interface EmpatraHostToolCorrelation {
+	catalogRevision: string;
+	generation: number;
+	id: string;
+	threadId: string;
+	turnId: string;
+}
+
+export interface EmpatraHostToolResultFrame extends EmpatraHostToolCorrelation {
+	failed: boolean;
+	result: EmpatraHostToolResultValue;
+	type: "host_tool_result";
+}
+
+export interface EmpatraHostToolCancelFrame extends EmpatraHostToolCorrelation {
+	targetId: string;
+	type: "host_tool_cancel";
+}
+
+export interface EmpatraHostToolCallFrame extends EmpatraHostToolCorrelation {
+	arguments: Record<string, unknown>;
+	toolCallId: string;
+	toolName: string;
+	type: "host_tool_call";
+}
+
+export type EmpatraHostToolOutboundFrame = EmpatraHostToolCallFrame | EmpatraHostToolCancelFrame;
+
+export type EmpatraHostTurnStatus = "completed" | "failed" | "interrupted" | "running";
+
+export interface EmpatraHostTurnSummary {
+	completedAt?: number;
+	durationMs?: number;
+	id: string;
+	itemCount: number;
+	startedAt?: number;
+	status: EmpatraHostTurnStatus;
+}
+
+export interface EmpatraHostThreadTurnsCommand {
+	cursor?: string;
+	id: string;
+	limit: number;
+	sortDirection?: "asc" | "desc";
+	threadId: string;
+	type: "thread_turns";
+}
+
+export type EmpatraHostGoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+
+export interface EmpatraHostThreadGoal {
+	createdAt: number;
+	objective: string;
+	status: EmpatraHostGoalStatus;
+	threadId: string;
+	timeUsedSeconds: number;
+	tokenBudget: number | null;
+	tokensUsed: number;
+	updatedAt: number;
+}
+
+export interface EmpatraHostGoalGetCommand {
+	id: string;
+	threadId: string;
+	type: "goal_get";
+}
+
+export interface EmpatraHostGoalSetCommand {
+	id: string;
+	objective?: string | null;
+	status?: EmpatraHostGoalStatus | null;
+	threadId: string;
+	tokenBudget?: number | null;
+	type: "goal_set";
+}
+
+export interface EmpatraHostGoalClearCommand {
+	id: string;
+	threadId: string;
+	type: "goal_clear";
+}
+
+export interface EmpatraHostThreadListCommand {
+	archived?: boolean;
+	id: string;
+	limit: number;
+	offset: number;
+	searchTerm?: string;
+	type: "thread_list";
+}
+
+export interface EmpatraHostThreadArchiveCommand {
+	id: string;
+	threadId: string;
+	type: "thread_archive";
+}
+
+export interface EmpatraHostThreadUnarchiveCommand {
+	id: string;
+	threadId: string;
+	type: "thread_unarchive";
+}
+
+export interface EmpatraHostThreadDeleteCommand {
+	id: string;
+	threadId: string;
+	type: "thread_delete";
+}
+
+export interface EmpatraHostThreadRenameCommand {
+	id: string;
+	threadId: string;
+	title: string;
+	type: "thread_rename";
+}
+
+export interface EmpatraHostTurnStartCommand {
+	expectedGeneration: number;
+	id: string;
+	images?: EmpatraHostImageDescriptor[];
+	message: string;
+	reasoningEffort?: EmpatraHostReasoningEffort | null;
+	threadId: string;
+	turnId: string;
+	type: "turn_start";
+}
+
+export interface EmpatraHostTurnInterruptCommand {
+	expectedGeneration: number;
+	id: string;
+	threadId: string;
+	turnId: string;
+	type: "turn_interrupt";
+}
+
+export interface EmpatraHostTurnSteerCommand {
+	expectedGeneration: number;
+	id: string;
+	images?: EmpatraHostImageDescriptor[];
+	message: string;
+	threadId: string;
+	turnId: string;
+	type: "turn_steer";
+}
+
+interface EmpatraHostInteractionCommandBase {
+	digest: string;
+	expectedGeneration: number;
+	id: string;
+	requestId: string;
+	threadId: string;
+	turnId: string;
+}
+
+export interface EmpatraHostInteractionRespondCommand extends EmpatraHostInteractionCommandBase {
+	response:
+		| Omit<EmpatraHostApprovalResponse, "digest" | "requestId">
+		| Omit<EmpatraHostUserInputResponse, "digest" | "requestId">;
+	type: "interaction_respond";
+}
+
+export interface EmpatraHostInteractionCancelCommand extends EmpatraHostInteractionCommandBase {
+	type: "interaction_cancel";
+}
+
+export interface EmpatraHostInteractionActivityCommand extends EmpatraHostInteractionCommandBase {
+	type: "interaction_activity";
+}
+
+export interface EmpatraHostShutdownCommand {
+	id: string;
+	type: "host_shutdown";
+}
+
+export type EmpatraHostCommand =
+	| EmpatraHostGoalClearCommand
+	| EmpatraHostGoalGetCommand
+	| EmpatraHostGoalSetCommand
+	| EmpatraHostInitializeCommand
+	| EmpatraHostInteractionActivityCommand
+	| EmpatraHostInteractionCancelCommand
+	| EmpatraHostInteractionRespondCommand
+	| EmpatraHostToolsReplaceCommand
+	| EmpatraHostToolCancelFrame
+	| EmpatraHostToolResultFrame
+	| EmpatraHostShutdownCommand
+	| EmpatraHostThreadArchiveCommand
+	| EmpatraHostThreadCompactCommand
+	| EmpatraHostThreadCreateCommand
+	| EmpatraHostThreadCreateAndStartCommand
+	| EmpatraHostThreadDeleteCommand
+	| EmpatraHostThreadForkCommand
+	| EmpatraHostThreadForkAndStartCommand
+	| EmpatraHostThreadListCommand
+	| EmpatraHostThreadReadCommand
+	| EmpatraHostThreadRenameCommand
+	| EmpatraHostThreadRollbackCommand
+	| EmpatraHostThreadTurnsCommand
+	| EmpatraHostThreadUnarchiveCommand
+	| EmpatraHostTurnInterruptCommand
+	| EmpatraHostTurnSteerCommand
+	| EmpatraHostTurnStartCommand;
+
+export interface EmpatraHostReadyFrame {
+	maxFrameBytes: number;
+	protocolVersion: typeof EMPATRA_HOST_PROTOCOL_VERSION;
+	type: "host_ready";
+}
+
+export interface EmpatraHostTurnCompletedEvent {
+	event: "turn_completed";
+	error?: Readonly<{ code: string; message: string }>;
+	generation: number;
+	outcome: "completed" | "failed" | "interrupted";
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+}
+
+export interface EmpatraHostTurnOutputEvent {
+	contentIndex: number;
+	delta: string;
+	event: "turn_output";
+	generation: number;
+	kind: "text_delta" | "thinking_delta";
+	messageIndex: number;
+	sequence: number;
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+}
+
+export interface EmpatraHostTokenUsage {
+	cachedInputTokens: number;
+	inputTokens: number;
+	outputTokens: number;
+	reasoningOutputTokens: number;
+	totalTokens: number;
+}
+
+export interface EmpatraHostContextUsage {
+	modelContextWindow: number;
+	observedAtMs: number | null;
+	tokenUsage: Readonly<{
+		last: EmpatraHostTokenUsage;
+		total: EmpatraHostTokenUsage;
+	}>;
+	turnId: string | null;
+}
+
+export interface EmpatraHostTurnUsageUpdatedEvent {
+	contextUsage: EmpatraHostContextUsage;
+	event: "turn_usage_updated";
+	generation: number;
+	messageIndex: number;
+	sequence: number;
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+}
+
+export interface EmpatraHostInteractionRequestedEvent {
+	event: "interaction_requested";
+	generation: number;
+	request: EmpatraHostInteractionRequest;
+	sequence: number;
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+}
+
+export interface EmpatraHostToolFileChange {
+	diff: string;
+	diffTruncated: boolean;
+	kind: "create" | "delete" | "modify" | "move";
+	path: string;
+}
+
+export interface EmpatraHostToolExecutionStartPayload {
+	argumentsText: string;
+	argumentsTruncated: boolean;
+	phase: "start";
+	toolCallId: string;
+	toolName: string;
+}
+
+export type EmpatraHostToolExecutionUpdate =
+	| Readonly<{ resultText: string; resultTruncated: boolean; type: "output_delta" | "output_snapshot" }>
+	| Readonly<{
+			changes: readonly EmpatraHostToolFileChange[];
+			changesTruncated: boolean;
+			type: "changes_snapshot";
+	  }>;
+
+export interface EmpatraHostToolExecutionUpdatePayload {
+	phase: "update";
+	toolCallId: string;
+	toolName: string;
+	update: EmpatraHostToolExecutionUpdate;
+}
+
+export interface EmpatraHostToolExecutionEndPayload {
+	argumentsText: string;
+	argumentsTruncated: boolean;
+	failed: boolean;
+	phase: "end";
+	resultText: string;
+	resultTruncated: boolean;
+	toolCallId: string;
+	toolName: string;
+}
+
+interface EmpatraHostToolEventBase {
+	generation: number;
+	sequence: number;
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+}
+
+export interface EmpatraHostToolExecutionStartEvent extends EmpatraHostToolEventBase {
+	argumentsText: string;
+	argumentsTruncated: boolean;
+	event: "tool_execution_start";
+	toolCallId: string;
+	toolName: string;
+}
+
+export interface EmpatraHostToolExecutionUpdateEvent extends EmpatraHostToolEventBase {
+	event: "tool_execution_update";
+	toolCallId: string;
+	toolName: string;
+	update: EmpatraHostToolExecutionUpdate;
+}
+
+export interface EmpatraHostToolExecutionEndEvent extends EmpatraHostToolEventBase {
+	argumentsText: string;
+	argumentsTruncated: boolean;
+	event: "tool_execution_end";
+	failed: boolean;
+	resultText: string;
+	resultTruncated: boolean;
+	toolCallId: string;
+	toolName: string;
+}
+
+export type EmpatraHostEvent =
+	| EmpatraHostInteractionRequestedEvent
+	| EmpatraHostToolExecutionEndEvent
+	| EmpatraHostToolExecutionStartEvent
+	| EmpatraHostToolExecutionUpdateEvent
+	| EmpatraHostTurnCompletedEvent
+	| EmpatraHostTurnOutputEvent
+	| EmpatraHostTurnUsageUpdatedEvent;
+
+export interface EmpatraHostSuccessResponse {
+	data?: unknown;
+	id: string;
+	success: true;
+	type: "host_response";
+}
+
+export interface EmpatraHostErrorResponse {
+	code: string;
+	error: string;
+	id: string | null;
+	success: false;
+	type: "host_response";
+}
+
+export type EmpatraHostResponse = EmpatraHostErrorResponse | EmpatraHostSuccessResponse;
+
+export interface EmpatraHostFailure {
+	code: string;
+	message: string;
+}
+
+const SAFE_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
+	already_initialized: "OMP host is already initialized",
+	capacity_exhausted: "OMP host thread capacity is exhausted",
+	disposed: "OMP host thread registry is unavailable",
+	duplicate_request: "A host command with this id is already running",
+	event_backpressure: "OMP host output exceeded the safe queue limit",
+	event_sink_missing: "OMP host event transport is unavailable",
+	frame_too_large: "OMP host frame exceeds the protocol limit",
+	goal_missing: "The thread has no goal to update",
+	goal_state_corrupt: "The persisted thread goal is invalid",
+	image_capacity_exceeded: "OMP host image input capacity is exhausted",
+	host_tool_capacity: "OMP host tool capacity is exhausted",
+	host_tool_catalog_invalid: "OMP host tool catalog is invalid",
+	host_tool_catalog_mismatch: "OMP host tool catalog revision does not match",
+	host_tool_not_pending: "OMP host tool call is no longer pending",
+	host_tool_protocol_violation: "OMP host tool response is invalid",
+	host_disposed: "OMP host is shutting down",
+	identity_mismatch: "OMP thread identity validation failed",
+	interaction_not_pending: "OMP host interaction is no longer pending",
+	interaction_response_invalid: "OMP host interaction response is invalid",
+	image_input_invalid: "OMP host image input is invalid",
+	invalid_cursor: "OMP host pagination cursor is invalid",
+	invalid_json: "OMP host command is not valid JSON",
+	invalid_limit: "OMP host limit is invalid",
+	invalid_request: "OMP host command is invalid",
+	model_denied: "The requested model is outside the injected catalog",
+	model_input_unsupported: "The requested model does not support image input",
+	model_not_found: "The requested model is unavailable",
+	not_initialized: "OMP host is not initialized",
+	operation_conflict: "The operation id is already bound to different inputs",
+	atomic_operation_uncertain: "OMP cannot safely replay an accepted atomic operation",
+	rollback_unavailable: "OMP cannot roll back the requested number of turns",
+	runtime_error: "OMP host operation failed",
+	server_busy: "OMP host command queue is full",
+	stale_generation: "The command targets a stale thread generation",
+	stale_cursor: "OMP host pagination cursor is stale",
+	stale_turn: "The command does not match the active turn",
+	thread_config_missing: "The thread is missing its OMP host configuration",
+	thread_not_found: "The thread does not exist in this host",
+	thread_not_loaded: "The thread is not loaded",
+	thread_not_persisted: "The thread has no durable session",
+	thread_rename_failed: "OMP rejected the thread title",
+	turn_state_corrupt: "The persisted thread turn history is invalid",
+	turn_active: "The thread has an active turn",
+	turn_failed: "OMP turn failed",
+	unknown_command: "OMP host command is not supported",
+	workspace_denied: "The working directory is outside the authorized workspace",
+	workspace_unavailable: "The authorized workspace is unavailable",
+};
+
+export function projectEmpatraHostFailure(error: unknown, fallbackCode = "runtime_error"): EmpatraHostFailure {
+	const candidateCode =
+		error instanceof EmpatraHostProtocolError || error instanceof EmpatraHostRegistryError
+			? error.code
+			: fallbackCode;
+	const message = Object.hasOwn(SAFE_FAILURE_MESSAGES, candidateCode)
+		? SAFE_FAILURE_MESSAGES[candidateCode]
+		: undefined;
+	if (message) return { code: candidateCode, message };
+	return {
+		code: fallbackCode === "turn_failed" ? "turn_failed" : "runtime_error",
+		message: fallbackCode === "turn_failed" ? SAFE_FAILURE_MESSAGES.turn_failed : SAFE_FAILURE_MESSAGES.runtime_error,
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	const allowed = new Set(keys);
+	return Object.keys(value).every(key => allowed.has(key));
+}
+
+function boundedString(value: unknown, field: string, minLength: number, maxLength: number): string {
+	if (
+		typeof value !== "string" ||
+		value.length < minLength ||
+		value.length > maxLength ||
+		CONTROL_CHARACTER.test(value)
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", `${field} is invalid`);
+	}
+	return value;
+}
+
+function boundedText(value: unknown, field: string, minLength: number, maxLength: number): string {
+	if (typeof value !== "string" || value.length < minLength || value.length > maxLength) {
+		throw new EmpatraHostProtocolError("invalid_request", `${field} is invalid`);
+	}
+	for (const character of value) {
+		const codePoint = character.codePointAt(0) ?? 0;
+		if (codePoint < 32 && character !== "\n" && character !== "\r" && character !== "\t") {
+			throw new EmpatraHostProtocolError("invalid_request", `${field} is invalid`);
+		}
+	}
+	return value;
+}
+
+function identifier(value: unknown, field: string): string {
+	return boundedString(value, field, 1, 256);
+}
+
+function boundedInteger(value: unknown, field: string, min: number, max: number): number {
+	if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
+		throw new EmpatraHostProtocolError("invalid_request", `${field} is invalid`);
+	}
+	return value as number;
+}
+
+function imageDescriptor(value: unknown, index: number): EmpatraHostImageDescriptor {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, ["byteLength", "detail", "displayName", "mimeType", "sha256"]) ||
+		typeof value.sha256 !== "string" ||
+		!/^[a-f0-9]{64}$/.test(value.sha256) ||
+		(value.mimeType !== "image/gif" &&
+			value.mimeType !== "image/jpeg" &&
+			value.mimeType !== "image/png" &&
+			value.mimeType !== "image/webp") ||
+		(value.detail !== undefined && value.detail !== "auto" && value.detail !== "high" && value.detail !== "low") ||
+		(value.displayName !== undefined &&
+			(typeof value.displayName !== "string" ||
+				value.displayName.length === 0 ||
+				value.displayName.length > 160 ||
+				CONTROL_CHARACTER.test(value.displayName) ||
+				sanitizeEmpatraHostImageDisplayName(value.displayName) !== value.displayName))
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", `images[${index}] is invalid`);
+	}
+	return {
+		byteLength: boundedInteger(value.byteLength, `images[${index}].byteLength`, 1, EMPATRA_HOST_MAX_IMAGE_BYTES),
+		...(value.detail === undefined ? {} : { detail: value.detail }),
+		...(value.displayName === undefined
+			? {}
+			: { displayName: sanitizeEmpatraHostImageDisplayName(value.displayName) }),
+		mimeType: value.mimeType,
+		sha256: value.sha256,
+	};
+}
+
+function optionalImages(value: unknown): EmpatraHostImageDescriptor[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.length === 0 || value.length > EMPATRA_HOST_MAX_IMAGES) {
+		throw new EmpatraHostProtocolError("invalid_request", "images is invalid");
+	}
+	const images = value.map(imageDescriptor);
+	const totalBytes = images.reduce((total, image) => total + image.byteLength, 0);
+	if (totalBytes > EMPATRA_HOST_MAX_IMAGE_BYTES_TOTAL) {
+		throw new EmpatraHostProtocolError("invalid_request", "images exceeds its aggregate byte limit");
+	}
+	return images;
+}
+
+function promptMessage(value: unknown, images: readonly EmpatraHostImageDescriptor[] | undefined): string {
+	return boundedText(value, "message", images ? 0 : 1, 786_432);
+}
+
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+	if (value === undefined || typeof value === "boolean") return value;
+	throw new EmpatraHostProtocolError("invalid_request", `${field} is invalid`);
+}
+
+function optionalNullableGoalStatus(value: unknown): EmpatraHostGoalStatus | null | undefined {
+	if (value === undefined || value === null) return value;
+	if (
+		value === "active" ||
+		value === "paused" ||
+		value === "blocked" ||
+		value === "usageLimited" ||
+		value === "budgetLimited" ||
+		value === "complete"
+	) {
+		return value;
+	}
+	throw new EmpatraHostProtocolError("invalid_request", "status is invalid");
+}
+
+function optionalNullableObjective(value: unknown): string | null | undefined {
+	if (value === undefined || value === null) return value;
+	if (typeof value !== "string" || value.length > 65_536 || value.trim().length === 0) {
+		throw new EmpatraHostProtocolError("invalid_request", "objective is invalid");
+	}
+	for (const character of value) {
+		const codePoint = character.codePointAt(0) ?? 0;
+		if (codePoint < 32 && character !== "\n" && character !== "\r" && character !== "\t") {
+			throw new EmpatraHostProtocolError("invalid_request", "objective is invalid");
+		}
+	}
+	return value;
+}
+
+function optionalNullableTokenBudget(value: unknown): number | null | undefined {
+	if (value === undefined || value === null) return value;
+	return boundedInteger(value, "tokenBudget", 1, 1_000_000_000);
+}
+
+function interactionDigest(value: unknown): string {
+	if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value)) {
+		throw new EmpatraHostProtocolError("invalid_request", "digest is invalid");
+	}
+	return value;
+}
+
+function catalogRevision(value: unknown): string {
+	if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value)) {
+		throw new EmpatraHostProtocolError("invalid_request", "catalogRevision is invalid");
+	}
+	return value;
+}
+
+function hostToolName(value: unknown, field: string): string {
+	const name = boundedString(value, field, 1, 64);
+	if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) {
+		throw new EmpatraHostProtocolError("invalid_request", `${field} is invalid`);
+	}
+	return name;
+}
+
+function hostToolDefinition(value: unknown, index: number): EmpatraHostToolDefinition {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, ["description", "hidden", "label", "loadMode", "name", "parameters"]) ||
+		!isRecord(value.parameters) ||
+		(value.hidden !== undefined && typeof value.hidden !== "boolean") ||
+		(value.loadMode !== undefined && value.loadMode !== "discoverable" && value.loadMode !== "essential")
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", `tools[${index}] is invalid`);
+	}
+	return {
+		description: boundedText(value.description, `tools[${index}].description`, 1, 4096),
+		...(value.hidden === undefined ? {} : { hidden: value.hidden }),
+		...(value.label === undefined ? {} : { label: boundedText(value.label, `tools[${index}].label`, 1, 512) }),
+		...(value.loadMode === undefined ? {} : { loadMode: value.loadMode }),
+		name: hostToolName(value.name, `tools[${index}].name`),
+		parameters: value.parameters,
+	};
+}
+
+function jsonValue(value: unknown, depth = 0): unknown {
+	if (depth > 64) throw new EmpatraHostProtocolError("invalid_request", "JSON value is too deeply nested");
+	if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (Array.isArray(value)) return value.map(item => jsonValue(item, depth + 1));
+	if (!isRecord(value)) throw new EmpatraHostProtocolError("invalid_request", "JSON value is invalid");
+	const result: Record<string, unknown> = {};
+	for (const [key, nested] of Object.entries(value)) result[key] = jsonValue(nested, depth + 1);
+	return result;
+}
+
+function hostToolResult(value: unknown): EmpatraHostToolResultValue {
+	if (!isRecord(value) || !hasOnlyKeys(value, ["content", "details"]) || !Array.isArray(value.content)) {
+		throw new EmpatraHostProtocolError("invalid_request", "host tool result is invalid");
+	}
+	const content = value.content.map((block, index): EmpatraHostToolResultContent => {
+		if (!isRecord(block) || typeof block.type !== "string") {
+			throw new EmpatraHostProtocolError("invalid_request", `result.content[${index}] is invalid`);
+		}
+		if (block.type === "text" && hasOnlyKeys(block, ["text", "type"])) {
+			return { text: boundedText(block.text, `result.content[${index}].text`, 0, 512 * 1024), type: "text" };
+		}
+		if (block.type === "image" && hasOnlyKeys(block, ["data", "mimeType", "type"])) {
+			return {
+				data: boundedString(block.data, `result.content[${index}].data`, 1, 512 * 1024),
+				mimeType: boundedString(block.mimeType, `result.content[${index}].mimeType`, 1, 256),
+				type: "image",
+			};
+		}
+		throw new EmpatraHostProtocolError("invalid_request", `result.content[${index}] is invalid`);
+	});
+	const result = {
+		content,
+		...(value.details === undefined ? {} : { details: jsonValue(value.details) }),
+	} satisfies EmpatraHostToolResultValue;
+	if (textEncoder.encode(JSON.stringify(result)).byteLength > EMPATRA_HOST_MAX_HOST_TOOL_RESULT_BYTES) {
+		throw new EmpatraHostProtocolError("frame_too_large", "Host tool result exceeds its limit");
+	}
+	return result;
+}
+
+function interactionResponse(
+	value: unknown,
+):
+	| Omit<EmpatraHostApprovalResponse, "digest" | "requestId">
+	| Omit<EmpatraHostUserInputResponse, "digest" | "requestId"> {
+	if (!isRecord(value)) throw new EmpatraHostProtocolError("invalid_request", "interaction response is invalid");
+	if (value.kind === "approval_response") {
+		if (!hasOnlyKeys(value, ["decision", "kind"]) || (value.decision !== "approve" && value.decision !== "deny")) {
+			throw new EmpatraHostProtocolError("invalid_request", "interaction response is invalid");
+		}
+		return { decision: value.decision, kind: "approval_response" };
+	}
+	if (
+		value.kind !== "user_input_response" ||
+		!hasOnlyKeys(value, ["inputKind", "kind", "value"]) ||
+		(value.inputKind !== "ask_dialog" &&
+			value.inputKind !== "confirm" &&
+			value.inputKind !== "editor" &&
+			value.inputKind !== "input" &&
+			value.inputKind !== "select")
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", "interaction response is invalid");
+	}
+	return {
+		inputKind: value.inputKind,
+		kind: "user_input_response",
+		value: value.value as EmpatraHostUserInputResponse["value"],
+	};
+}
+
+function absolutePath(value: unknown, field: string): string {
+	const result = boundedString(value, field, 1, 32_768);
+	if (!path.isAbsolute(result)) {
+		throw new EmpatraHostProtocolError("invalid_request", `${field} must be absolute`);
+	}
+	return path.normalize(result);
+}
+
+function gatewayBaseUrl(value: unknown): string {
+	const raw = boundedString(value, "gatewayBaseUrl", 1, 2048);
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		throw new EmpatraHostProtocolError("invalid_request", "gatewayBaseUrl is invalid");
+	}
+	if (
+		url.protocol !== "http:" ||
+		(url.hostname !== "127.0.0.1" && url.hostname !== "[::1]" && url.hostname !== "::1") ||
+		url.username !== "" ||
+		url.password !== "" ||
+		url.search !== "" ||
+		url.hash !== ""
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", "gatewayBaseUrl must be credential-free HTTP loopback");
+	}
+	return url.toString().replace(/\/$/, "");
+}
+
+function reasoningEfforts(value: unknown): EmpatraHostReasoningEffort[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > 7 || new Set(value).size !== value.length) {
+		throw new EmpatraHostProtocolError("invalid_request", "model.reasoningEfforts is invalid");
+	}
+	const allowed = new Set<EmpatraHostReasoningEffort>(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+	if (value.some(effort => typeof effort !== "string" || !allowed.has(effort as EmpatraHostReasoningEffort))) {
+		throw new EmpatraHostProtocolError("invalid_request", "model.reasoningEfforts is invalid");
+	}
+	return value as EmpatraHostReasoningEffort[];
+}
+
+function optionalReasoningEffort(value: unknown): EmpatraHostReasoningEffort | null {
+	if (value === undefined || value === null) return null;
+	return reasoningEfforts([value])[0]!;
+}
+
+function model(value: unknown): EmpatraHostModel {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, [
+			"api",
+			"contextWindow",
+			"id",
+			"input",
+			"maxTokens",
+			"name",
+			"reasoning",
+			"reasoningEfforts",
+			"supportsTools",
+		]) ||
+		value.api !== "openai-responses" ||
+		typeof value.reasoning !== "boolean" ||
+		typeof value.supportsTools !== "boolean" ||
+		!Array.isArray(value.input) ||
+		value.input.length === 0 ||
+		value.input.length > 2 ||
+		value.input.some(input => input !== "text" && input !== "image") ||
+		new Set(value.input).size !== value.input.length ||
+		value.input[0] !== "text"
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", "models contains an invalid model");
+	}
+	return {
+		api: "openai-responses",
+		contextWindow: boundedInteger(value.contextWindow, "model.contextWindow", 1, 10_000_000),
+		id: identifier(value.id, "model.id"),
+		input: value.input as ("image" | "text")[],
+		maxTokens: boundedInteger(value.maxTokens, "model.maxTokens", 1, 10_000_000),
+		name: boundedString(value.name, "model.name", 1, 512),
+		reasoning: value.reasoning,
+		...(value.reasoningEfforts === undefined ? {} : { reasoningEfforts: reasoningEfforts(value.reasoningEfforts) }),
+		supportsTools: value.supportsTools,
+	};
+}
+
+function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeCommand {
+	if (
+		!hasOnlyKeys(value, [
+			"capability",
+			"gatewayBaseUrl",
+			"id",
+			"models",
+			"protocolVersion",
+			"sessionDirectory",
+			"type",
+			"workspaceRoots",
+		]) ||
+		value.protocolVersion !== EMPATRA_HOST_PROTOCOL_VERSION ||
+		!Array.isArray(value.models) ||
+		value.models.length === 0 ||
+		value.models.length > EMPATRA_HOST_MAX_MODELS ||
+		!Array.isArray(value.workspaceRoots) ||
+		value.workspaceRoots.length === 0 ||
+		value.workspaceRoots.length > EMPATRA_HOST_MAX_WORKSPACE_ROOTS
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", "host_initialize is invalid");
+	}
+	const models = value.models.map(model);
+	if (new Set(models.map(entry => entry.id)).size !== models.length) {
+		throw new EmpatraHostProtocolError("invalid_request", "model ids must be unique");
+	}
+	const workspaceRoots = value.workspaceRoots.map((root, index) => absolutePath(root, `workspaceRoots[${index}]`));
+	if (new Set(workspaceRoots).size !== workspaceRoots.length) {
+		throw new EmpatraHostProtocolError("invalid_request", "workspaceRoots must be unique");
+	}
+	return {
+		capability: boundedString(value.capability, "capability", 32, 512),
+		gatewayBaseUrl: gatewayBaseUrl(value.gatewayBaseUrl),
+		id: identifier(value.id, "id"),
+		models,
+		protocolVersion: EMPATRA_HOST_PROTOCOL_VERSION,
+		sessionDirectory: absolutePath(value.sessionDirectory, "sessionDirectory"),
+		type: "host_initialize",
+		workspaceRoots,
+	};
+}
+
+export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
+	if (textEncoder.encode(frame).byteLength > EMPATRA_HOST_MAX_FRAME_BYTES) {
+		throw new EmpatraHostProtocolError("frame_too_large", "Host command exceeds the physical frame limit");
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(frame);
+	} catch {
+		throw new EmpatraHostProtocolError("invalid_json", "Host command is not valid JSON");
+	}
+	if (!isRecord(parsed) || typeof parsed.type !== "string") {
+		throw new EmpatraHostProtocolError("invalid_request", "Host command must be an object with a type");
+	}
+	if (parsed.type === "host_initialize") return parseInitialize(parsed);
+	const id = identifier(parsed.id, "id");
+
+	switch (parsed.type) {
+		case "host_tools_replace":
+			if (
+				!hasOnlyKeys(parsed, ["catalogRevision", "id", "tools", "type"]) ||
+				!Array.isArray(parsed.tools) ||
+				parsed.tools.length > EMPATRA_HOST_MAX_HOST_TOOLS
+			) {
+				throw new EmpatraHostProtocolError("invalid_request", "host_tools_replace is invalid");
+			}
+			return {
+				catalogRevision: catalogRevision(parsed.catalogRevision),
+				id,
+				tools: parsed.tools.map(hostToolDefinition),
+				type: "host_tools_replace",
+			};
+		case "host_tool_result":
+			if (
+				!hasOnlyKeys(parsed, [
+					"catalogRevision",
+					"failed",
+					"generation",
+					"id",
+					"result",
+					"threadId",
+					"turnId",
+					"type",
+				]) ||
+				typeof parsed.failed !== "boolean"
+			) {
+				throw new EmpatraHostProtocolError("invalid_request", "host_tool_result is invalid");
+			}
+			return {
+				catalogRevision: catalogRevision(parsed.catalogRevision),
+				failed: parsed.failed,
+				generation: boundedInteger(parsed.generation, "generation", 1, Number.MAX_SAFE_INTEGER),
+				id,
+				result: hostToolResult(parsed.result),
+				threadId: identifier(parsed.threadId, "threadId"),
+				turnId: identifier(parsed.turnId, "turnId"),
+				type: "host_tool_result",
+			};
+		case "host_tool_cancel":
+			if (!hasOnlyKeys(parsed, ["catalogRevision", "generation", "id", "targetId", "threadId", "turnId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "host_tool_cancel is invalid");
+			}
+			return {
+				catalogRevision: catalogRevision(parsed.catalogRevision),
+				generation: boundedInteger(parsed.generation, "generation", 1, Number.MAX_SAFE_INTEGER),
+				id,
+				targetId: identifier(parsed.targetId, "targetId"),
+				threadId: identifier(parsed.threadId, "threadId"),
+				turnId: identifier(parsed.turnId, "turnId"),
+				type: "host_tool_cancel",
+			};
+		case "host_shutdown":
+			if (!hasOnlyKeys(parsed, ["id", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", `${parsed.type} contains unknown fields`);
+			}
+			return { id, type: parsed.type };
+		case "interaction_activity":
+		case "interaction_cancel":
+			if (!hasOnlyKeys(parsed, ["digest", "expectedGeneration", "id", "requestId", "threadId", "turnId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", `${parsed.type} contains unknown fields`);
+			}
+			return {
+				digest: interactionDigest(parsed.digest),
+				expectedGeneration: boundedInteger(
+					parsed.expectedGeneration,
+					"expectedGeneration",
+					1,
+					Number.MAX_SAFE_INTEGER,
+				),
+				id,
+				requestId: identifier(parsed.requestId, "requestId"),
+				threadId: identifier(parsed.threadId, "threadId"),
+				turnId: identifier(parsed.turnId, "turnId"),
+				type: parsed.type,
+			};
+		case "interaction_respond":
+			if (
+				!hasOnlyKeys(parsed, [
+					"digest",
+					"expectedGeneration",
+					"id",
+					"requestId",
+					"response",
+					"threadId",
+					"turnId",
+					"type",
+				])
+			) {
+				throw new EmpatraHostProtocolError("invalid_request", "interaction_respond contains unknown fields");
+			}
+			return {
+				digest: interactionDigest(parsed.digest),
+				expectedGeneration: boundedInteger(
+					parsed.expectedGeneration,
+					"expectedGeneration",
+					1,
+					Number.MAX_SAFE_INTEGER,
+				),
+				id,
+				requestId: identifier(parsed.requestId, "requestId"),
+				response: interactionResponse(parsed.response),
+				threadId: identifier(parsed.threadId, "threadId"),
+				turnId: identifier(parsed.turnId, "turnId"),
+				type: "interaction_respond",
+			};
+		case "thread_list":
+			if (!hasOnlyKeys(parsed, ["archived", "id", "limit", "offset", "searchTerm", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_list contains unknown fields");
+			}
+			return {
+				...(optionalBoolean(parsed.archived, "archived") === undefined
+					? {}
+					: { archived: optionalBoolean(parsed.archived, "archived") }),
+				id,
+				limit: boundedInteger(parsed.limit, "limit", 1, 200),
+				offset: boundedInteger(parsed.offset, "offset", 0, Number.MAX_SAFE_INTEGER),
+				...(parsed.searchTerm === undefined
+					? {}
+					: { searchTerm: boundedString(parsed.searchTerm, "searchTerm", 1, 1024) }),
+				type: "thread_list",
+			};
+		case "thread_turns":
+			if (!hasOnlyKeys(parsed, ["cursor", "id", "limit", "sortDirection", "threadId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_turns contains unknown fields");
+			}
+			if (parsed.sortDirection !== undefined && parsed.sortDirection !== "asc" && parsed.sortDirection !== "desc") {
+				throw new EmpatraHostProtocolError("invalid_request", "sortDirection is invalid");
+			}
+			return {
+				...(parsed.cursor === undefined ? {} : { cursor: boundedString(parsed.cursor, "cursor", 1, 4096) }),
+				id,
+				limit: boundedInteger(parsed.limit, "limit", 1, 200),
+				...(parsed.sortDirection === undefined ? {} : { sortDirection: parsed.sortDirection }),
+				threadId: identifier(parsed.threadId, "threadId"),
+				type: "thread_turns",
+			};
+		case "goal_get":
+		case "goal_clear":
+			if (!hasOnlyKeys(parsed, ["id", "threadId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", `${parsed.type} contains unknown fields`);
+			}
+			return { id, threadId: identifier(parsed.threadId, "threadId"), type: parsed.type };
+		case "goal_set": {
+			if (!hasOnlyKeys(parsed, ["id", "objective", "status", "threadId", "tokenBudget", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "goal_set contains unknown fields");
+			}
+			const objective = optionalNullableObjective(parsed.objective);
+			const status = optionalNullableGoalStatus(parsed.status);
+			const tokenBudget = optionalNullableTokenBudget(parsed.tokenBudget);
+			if (objective === undefined && status === undefined && tokenBudget === undefined) {
+				throw new EmpatraHostProtocolError("invalid_request", "goal_set patch is empty");
+			}
+			return {
+				id,
+				...(objective === undefined ? {} : { objective }),
+				...(status === undefined ? {} : { status }),
+				threadId: identifier(parsed.threadId, "threadId"),
+				...(tokenBudget === undefined ? {} : { tokenBudget }),
+				type: "goal_set",
+			};
+		}
+		case "thread_archive":
+		case "thread_compact":
+		case "thread_delete":
+		case "thread_unarchive":
+			if (!hasOnlyKeys(parsed, ["id", "threadId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", `${parsed.type} contains unknown fields`);
+			}
+			return { id, threadId: identifier(parsed.threadId, "threadId"), type: parsed.type };
+		case "thread_rollback":
+			if (!hasOnlyKeys(parsed, ["id", "threadId", "turns", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_rollback contains unknown fields");
+			}
+			return {
+				id,
+				threadId: identifier(parsed.threadId, "threadId"),
+				turns: boundedInteger(parsed.turns, "turns", 1, 10_000),
+				type: "thread_rollback",
+			};
+		case "thread_fork":
+			if (!hasOnlyKeys(parsed, ["cwd", "id", "operationId", "threadId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_fork contains unknown fields");
+			}
+			return {
+				...(parsed.cwd === undefined ? {} : { cwd: absolutePath(parsed.cwd, "cwd") }),
+				id,
+				operationId: identifier(parsed.operationId, "operationId"),
+				threadId: identifier(parsed.threadId, "threadId"),
+				type: "thread_fork",
+			};
+		case "thread_rename":
+			if (!hasOnlyKeys(parsed, ["id", "threadId", "title", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_rename contains unknown fields");
+			}
+			return {
+				id,
+				threadId: identifier(parsed.threadId, "threadId"),
+				title: boundedString(parsed.title, "title", 1, 1024),
+				type: "thread_rename",
+			};
+		case "thread_read":
+			if (!hasOnlyKeys(parsed, ["cursor", "id", "limit", "threadId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_read contains unknown fields");
+			}
+			return {
+				...(parsed.cursor === undefined ? {} : { cursor: boundedString(parsed.cursor, "cursor", 1, 4096) }),
+				id,
+				limit: boundedInteger(parsed.limit, "limit", 1, 200),
+				threadId: identifier(parsed.threadId, "threadId"),
+				type: "thread_read",
+			};
+		case "thread_create":
+			if (!hasOnlyKeys(parsed, ["cwd", "id", "modelId", "operationId", "systemPrompt", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_create contains unknown fields");
+			}
+			return {
+				cwd: absolutePath(parsed.cwd, "cwd"),
+				id,
+				modelId: identifier(parsed.modelId, "modelId"),
+				operationId: identifier(parsed.operationId, "operationId"),
+				systemPrompt: boundedText(parsed.systemPrompt, "systemPrompt", 1, 262_144),
+				type: "thread_create",
+			};
+		case "thread_create_and_start":
+			if (
+				!hasOnlyKeys(parsed, [
+					"cwd",
+					"id",
+					"images",
+					"message",
+					"modelId",
+					"operationId",
+					"reasoningEffort",
+					"systemPrompt",
+					"turnId",
+					"type",
+				])
+			) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_create_and_start contains unknown fields");
+			}
+			{
+				const images = optionalImages(parsed.images);
+				return {
+					cwd: absolutePath(parsed.cwd, "cwd"),
+					id,
+					...(images ? { images } : {}),
+					message: promptMessage(parsed.message, images),
+					modelId: identifier(parsed.modelId, "modelId"),
+					operationId: identifier(parsed.operationId, "operationId"),
+					...(parsed.reasoningEffort === undefined
+						? {}
+						: { reasoningEffort: optionalReasoningEffort(parsed.reasoningEffort) }),
+					systemPrompt: boundedText(parsed.systemPrompt, "systemPrompt", 1, 262_144),
+					turnId: identifier(parsed.turnId, "turnId"),
+					type: "thread_create_and_start",
+				};
+			}
+		case "thread_fork_and_start":
+			if (
+				!hasOnlyKeys(parsed, [
+					"cwd",
+					"id",
+					"images",
+					"message",
+					"operationId",
+					"reasoningEffort",
+					"threadId",
+					"turnId",
+					"type",
+				])
+			) {
+				throw new EmpatraHostProtocolError("invalid_request", "thread_fork_and_start contains unknown fields");
+			}
+			{
+				const images = optionalImages(parsed.images);
+				return {
+					...(parsed.cwd === undefined ? {} : { cwd: absolutePath(parsed.cwd, "cwd") }),
+					id,
+					...(images ? { images } : {}),
+					message: promptMessage(parsed.message, images),
+					operationId: identifier(parsed.operationId, "operationId"),
+					...(parsed.reasoningEffort === undefined
+						? {}
+						: { reasoningEffort: optionalReasoningEffort(parsed.reasoningEffort) }),
+					threadId: identifier(parsed.threadId, "threadId"),
+					turnId: identifier(parsed.turnId, "turnId"),
+					type: "thread_fork_and_start",
+				};
+			}
+		case "turn_start":
+			if (
+				!hasOnlyKeys(parsed, [
+					"expectedGeneration",
+					"id",
+					"images",
+					"message",
+					"reasoningEffort",
+					"threadId",
+					"turnId",
+					"type",
+				])
+			) {
+				throw new EmpatraHostProtocolError("invalid_request", "turn_start contains unknown fields");
+			}
+			{
+				const images = optionalImages(parsed.images);
+				return {
+					expectedGeneration: boundedInteger(
+						parsed.expectedGeneration,
+						"expectedGeneration",
+						0,
+						Number.MAX_SAFE_INTEGER,
+					),
+					id,
+					...(images ? { images } : {}),
+					message: promptMessage(parsed.message, images),
+					...(parsed.reasoningEffort === undefined
+						? {}
+						: { reasoningEffort: optionalReasoningEffort(parsed.reasoningEffort) }),
+					threadId: identifier(parsed.threadId, "threadId"),
+					turnId: identifier(parsed.turnId, "turnId"),
+					type: "turn_start",
+				};
+			}
+		case "turn_interrupt":
+			if (!hasOnlyKeys(parsed, ["expectedGeneration", "id", "threadId", "turnId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "turn_interrupt contains unknown fields");
+			}
+			return {
+				expectedGeneration: boundedInteger(
+					parsed.expectedGeneration,
+					"expectedGeneration",
+					0,
+					Number.MAX_SAFE_INTEGER,
+				),
+				id,
+				threadId: identifier(parsed.threadId, "threadId"),
+				turnId: identifier(parsed.turnId, "turnId"),
+				type: "turn_interrupt",
+			};
+		case "turn_steer":
+			if (!hasOnlyKeys(parsed, ["expectedGeneration", "id", "images", "message", "threadId", "turnId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "turn_steer contains unknown fields");
+			}
+			{
+				const images = optionalImages(parsed.images);
+				return {
+					expectedGeneration: boundedInteger(
+						parsed.expectedGeneration,
+						"expectedGeneration",
+						0,
+						Number.MAX_SAFE_INTEGER,
+					),
+					id,
+					...(images ? { images } : {}),
+					message: promptMessage(parsed.message, images),
+					threadId: identifier(parsed.threadId, "threadId"),
+					turnId: identifier(parsed.turnId, "turnId"),
+					type: "turn_steer",
+				};
+			}
+		default:
+			throw new EmpatraHostProtocolError("unknown_command", `Unknown host command: ${parsed.type}`);
+	}
+}
+
+export function serializeEmpatraHostFrame(
+	frame: EmpatraHostEvent | EmpatraHostReadyFrame | EmpatraHostResponse | EmpatraHostToolOutboundFrame,
+): string {
+	const serialized = JSON.stringify(frame);
+	if (textEncoder.encode(serialized).byteLength > EMPATRA_HOST_MAX_FRAME_BYTES) {
+		throw new EmpatraHostProtocolError("frame_too_large", "Host response exceeds the physical frame limit");
+	}
+	return `${serialized}\n`;
+}

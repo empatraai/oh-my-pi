@@ -24,6 +24,8 @@ import type {
 	ExtensionError,
 	ExtensionServiceTier,
 	ExtensionUIContext,
+	ExtensionUIDialogOptions,
+	ExtensionUISelectItem,
 	InputEvent,
 	InputEventResult,
 	ProviderModelConfig,
@@ -2370,33 +2372,199 @@ describe("ExtensionRunner", () => {
 				sessionManager,
 				modelRegistry,
 			);
-			const select = vi.fn(async () => {
-				events.push({ type: "ui_select" });
-				return "Approve";
-			});
+			const select = vi.fn(
+				async (_title: string, _options: ExtensionUISelectItem[], _dialogOptions?: ExtensionUIDialogOptions) => {
+					events.push({ type: "ui_select" });
+					return "Approve";
+				},
+			);
 			initializeRunner(runner, select);
 
-			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
-			await (wrapper as ExtensionToolWrapper<any>).execute("call-approval", {}, undefined, undefined, {
-				sessionManager,
-				modelRegistry,
-				model: undefined,
-				isIdle: () => true,
-				hasQueuedMessages: () => false,
-				abort: () => {},
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
-			});
+			const wrapper = new ExtensionToolWrapper(
+				{
+					...approvalTool,
+					formatApprovalDetails: () => "Authorization: Bearer prompt-secret-123456",
+				},
+				runner,
+			);
+			const controller = new AbortController();
+			const effectiveParams = {
+				apiKey: "sk-1234567890abcdef",
+				command:
+					"AWS_SECRET_ACCESS_KEY=aws-secret-value TOKEN=opaque-token curl -H 'Authorization: Bearer bearer-value-123456' -H 'Cookie: first=private-one; second=private-two' --password hunter2 https://user:pass@example.test",
+				nested: { cookie: "session=private-cookie", note: "safe" },
+			};
+			await (wrapper as ExtensionToolWrapper<any>).execute(
+				"call-approval",
+				effectiveParams,
+				controller.signal,
+				undefined,
+				{
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				},
+			);
 
 			expect(events).toEqual([
 				{ type: "tool_approval_requested" },
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
-				"Deny",
-			]);
+			expect(select).toHaveBeenCalledWith(
+				expect.stringContaining("Allow tool: dangerous_tool"),
+				["Approve", "Deny"],
+				{
+					internalApprovalContext: {
+						inputDigest: new Bun.CryptoHasher("sha256").update(JSON.stringify(effectiveParams)).digest("hex"),
+						rawInput: expect.any(String),
+						toolCallId: "call-approval",
+						toolName: "dangerous_tool",
+					},
+					signal: controller.signal,
+				},
+			);
+			const rawInput = select.mock.calls[0]?.[2]?.internalApprovalContext?.rawInput;
+			expect(select.mock.calls[0]?.[0]).not.toContain("prompt-secret-123456");
+			expect(rawInput).toContain("[REDACTED]");
+			expect(rawInput).not.toContain("sk-1234567890abcdef");
+			expect(rawInput).not.toContain("bearer-value-123456");
+			expect(rawInput).not.toContain("hunter2");
+			expect(rawInput).not.toContain("user:pass");
+			expect(rawInput).not.toContain("aws-secret-value");
+			expect(rawInput).not.toContain("opaque-token");
+			expect(rawInput).not.toContain("private-one");
+			expect(rawInput).not.toContain("private-two");
+			expect(rawInput).not.toContain("private-cookie");
+			expect(new TextEncoder().encode(rawInput).byteLength).toBeLessThanOrEqual(16 * 1024);
 			delete globalState.__approvalEvents;
+		});
+
+		it("fails closed instead of approving a truncated input preview", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const select = vi.fn(async () => "Approve");
+			initializeRunner(runner, select);
+			const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "executed" }] }));
+			const wrapper = new ExtensionToolWrapper({ ...approvalTool, execute }, runner);
+
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute(
+					"call-oversized",
+					{ payload: "x".repeat(20_000) },
+					undefined,
+					undefined,
+					{
+						sessionManager,
+						modelRegistry,
+						model: undefined,
+						isIdle: () => true,
+						hasQueuedMessages: () => false,
+						abort: () => {},
+						settings: {
+							get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+						} as never,
+					},
+				),
+			).rejects.toThrow("Tool approval preview exceeds the safe display limit");
+			expect(select).not.toHaveBeenCalled();
+			expect(execute).not.toHaveBeenCalled();
+		});
+
+		it("passes the tool abort signal to a pending approval and never executes after interruption", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			let approvalSignal: AbortSignal | undefined;
+			const select = vi.fn(
+				async (_title: string, _options: ExtensionUISelectItem[], dialogOptions?: ExtensionUIDialogOptions) => {
+					approvalSignal = dialogOptions?.signal;
+					return new Promise<string | undefined>((_resolve, reject) => {
+						if (!approvalSignal) {
+							reject(new Error("approval signal missing"));
+							return;
+						}
+						approvalSignal.addEventListener(
+							"abort",
+							() => reject(new DOMException("Approval aborted", "AbortError")),
+							{ once: true },
+						);
+					});
+				},
+			);
+			initializeRunner(runner, select);
+			const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "executed" }] }));
+			const wrapper = new ExtensionToolWrapper({ ...approvalTool, execute }, runner);
+			const controller = new AbortController();
+
+			const execution = (wrapper as ExtensionToolWrapper<any>).execute(
+				"call-aborted-approval",
+				{ command: "pwd" },
+				controller.signal,
+				undefined,
+				{
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				},
+			);
+			expect(approvalSignal).toBe(controller.signal);
+			controller.abort();
+
+			await expect(execution).rejects.toMatchObject({ name: "AbortError" });
+			expect(execute).not.toHaveBeenCalled();
+		});
+
+		it("rejects an approved call when its exact serialized input changes while pending", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const mutableParams = { command: "pwd" };
+			initializeRunner(runner, async () => {
+				mutableParams.command = "rm -rf protected";
+				return "Approve";
+			});
+			const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "executed" }] }));
+			const wrapper = new ExtensionToolWrapper({ ...approvalTool, execute }, runner);
+
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute("call-mutated", mutableParams, undefined, undefined, {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: {
+						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+					} as never,
+				}),
+			).rejects.toThrow("Tool input changed after approval");
+			expect(execute).not.toHaveBeenCalled();
 		});
 
 		it("does not present approval before canonical or wire-aliased tool previews are ready", async () => {

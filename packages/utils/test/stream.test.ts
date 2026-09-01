@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import {
+	LineTooLongError,
 	parseJsonlLenient,
 	readJsonl,
 	readLines,
@@ -39,6 +40,18 @@ describe("sanitizeText", () => {
 	it("strips ANSI and normalizes CR", () => {
 		const input = "\u001b[31mred\u001b[0m\r\n";
 		expect(sanitizeText(input)).toBe("red\n");
+	});
+
+	it("rejects a line before its buffer grows beyond the configured limit", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode("1234"));
+				controller.enqueue(encoder.encode("5"));
+				controller.close();
+			},
+		});
+
+		await expect(collectAsync(readLines(readable, undefined, 4))).rejects.toBeInstanceOf(LineTooLongError);
 	});
 });
 

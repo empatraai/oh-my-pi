@@ -12,7 +12,14 @@ import type {
 	RpcHostToolUpdate,
 } from "./rpc-types";
 
-type RpcHostToolOutput = (frame: RpcHostToolCallRequest | RpcHostToolCancelRequest) => void;
+export interface RpcHostToolDispatchContext {
+	definition: RpcHostToolDefinition;
+}
+
+type RpcHostToolOutput = (
+	frame: RpcHostToolCallRequest | RpcHostToolCancelRequest,
+	context?: RpcHostToolDispatchContext,
+) => void;
 
 type PendingHostToolCall = {
 	resolve: (result: AgentToolResult<unknown>) => void;
@@ -147,11 +154,13 @@ export class RpcHostToolBridge {
 			if (settled) return;
 			settled = true;
 			cleanup();
-			this.#output({
-				type: "host_tool_cancel",
-				id: Snowflake.next() as string,
-				targetId: id,
-			});
+			try {
+				this.#output({
+					type: "host_tool_cancel",
+					id: Snowflake.next() as string,
+					targetId: id,
+				});
+			} catch {}
 			reject(new Error(`Host tool "${definition.name}" was aborted`));
 		};
 
@@ -172,13 +181,22 @@ export class RpcHostToolBridge {
 			onUpdate,
 		});
 
-		this.#output({
-			type: "host_tool_call",
-			id,
-			toolCallId,
-			toolName: definition.name,
-			arguments: args,
-		});
+		try {
+			this.#output(
+				{
+					type: "host_tool_call",
+					id,
+					toolCallId,
+					toolName: definition.name,
+					arguments: args,
+				},
+				{ definition },
+			);
+		} catch (error) {
+			settled = true;
+			cleanup();
+			reject(error instanceof Error ? error : new Error("Host tool dispatch failed"));
+		}
 
 		return promise;
 	}

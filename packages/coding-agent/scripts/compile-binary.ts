@@ -20,6 +20,10 @@ export interface CodingAgentCompileOptions {
 	readonly executablePath?: string;
 	/** Match release builds that minify identifiers while retaining names. */
 	readonly minifyIdentifiers?: boolean;
+	/** Minify syntax without changing the public names retained for diagnostics. */
+	readonly minifySyntax?: boolean;
+	/** Remove bundle whitespace that has no runtime meaning. */
+	readonly minifyWhitespace?: boolean;
 	/** Disable Bun's built-in Darwin signing before the caller re-signs. */
 	readonly skipBuiltinCodesign?: boolean;
 }
@@ -46,6 +50,8 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,
+				syntax: options.minifySyntax ?? false,
+				whitespace: options.minifyWhitespace ?? false,
 			},
 			plugins: [await createLegacyPiVirtualModulePlugin()],
 			compile: {
