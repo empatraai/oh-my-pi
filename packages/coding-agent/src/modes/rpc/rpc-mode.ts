@@ -11,6 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -114,6 +115,121 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
+
+const RPC_SECRET_FIELD_PARTS = new Set([
+	"auth",
+	"authentication",
+	"authorization",
+	"cookie",
+	"credential",
+	"credentials",
+	"header",
+	"headers",
+	"password",
+	"secret",
+	"token",
+]);
+
+function isRpcSecretField(key: string): boolean {
+	const parts = key
+		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter(Boolean);
+	if (parts.some(part => RPC_SECRET_FIELD_PARTS.has(part))) return true;
+	return parts.some((part, index) => part === "api" && parts[index + 1] === "key");
+}
+
+function sanitizeRpcPublicMetadata(value: unknown, seen = new WeakSet<object>()): unknown {
+	if (Array.isArray(value)) {
+		if (seen.has(value)) return undefined;
+		seen.add(value);
+		return value.map(item => sanitizeRpcPublicMetadata(item, seen));
+	}
+	if (!isRecord(value)) return value;
+	if (seen.has(value)) return undefined;
+	seen.add(value);
+
+	const sanitized: Record<string, unknown> = {};
+	for (const [key, nestedValue] of Object.entries(value)) {
+		if (isRpcSecretField(key)) continue;
+		const publicValue = sanitizeRpcPublicMetadata(nestedValue, seen);
+		if (publicValue !== undefined) sanitized[key] = publicValue;
+	}
+	return sanitized;
+}
+
+function sanitizeRpcPublicBaseUrl(baseUrl: string): string {
+	try {
+		const url = new URL(baseUrl);
+		const containsPrivateComponents = Boolean(url.username || url.password || url.search || url.hash);
+		if (!containsPrivateComponents) return baseUrl;
+		url.username = "";
+		url.password = "";
+		url.search = "";
+		url.hash = "";
+		return url.toString();
+	} catch {
+		// Invalid provider URLs are not useful to an RPC host and may be arbitrary
+		// secret-bearing configuration. Fail closed instead of echoing them.
+		return "";
+	}
+}
+
+/**
+ * Project the internal provider model onto the credential-free RPC contract.
+ *
+ * Models may carry request headers and custom provider metadata. RPC consumers
+ * only need stable selection and capability fields, so keep an explicit
+ * allowlist and sanitize the extensible compat record recursively.
+ */
+export function toRpcPublicModel(model: Model): Model;
+export function toRpcPublicModel(model: undefined): undefined;
+export function toRpcPublicModel(model: Model | undefined): Model | undefined;
+export function toRpcPublicModel(model: Model | undefined): Model | undefined {
+	if (!model) return undefined;
+	return {
+		id: model.id,
+		identity: {
+			class: model.identity.class,
+			...(model.identity.family !== undefined ? { family: model.identity.family } : {}),
+			...(model.identity.revision !== undefined ? { revision: model.identity.revision } : {}),
+			...(model.identity.effort !== undefined ? { effort: model.identity.effort } : {}),
+			...(model.identity.thinkingVariant !== undefined ? { thinkingVariant: model.identity.thinkingVariant } : {}),
+			...(model.identity.logicalId !== undefined ? { logicalId: model.identity.logicalId } : {}),
+		},
+		name: model.name,
+		api: model.api,
+		provider: model.provider,
+		baseUrl: sanitizeRpcPublicBaseUrl(model.baseUrl),
+		reasoning: model.reasoning,
+		input: [...model.input],
+		...(model.supportsTools !== undefined ? { supportsTools: model.supportsTools } : {}),
+		cost: {
+			input: model.cost.input,
+			output: model.cost.output,
+			cacheRead: model.cost.cacheRead,
+			cacheWrite: model.cost.cacheWrite,
+			...(model.cost.longContext
+				? {
+						longContext: {
+							input: model.cost.longContext.input,
+							output: model.cost.longContext.output,
+							cacheRead: model.cost.longContext.cacheRead,
+							cacheWrite: model.cost.longContext.cacheWrite,
+							inputThreshold: model.cost.longContext.inputThreshold,
+							...(model.cost.longContext.inputThresholdInclusive !== undefined
+								? { inputThresholdInclusive: model.cost.longContext.inputThresholdInclusive }
+								: {}),
+						},
+					}
+				: {}),
+		},
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+		compat: sanitizeRpcPublicMetadata(model.compat) as Model["compat"],
+	};
+}
 
 export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
@@ -1035,7 +1151,11 @@ export async function runRpcMode(
 						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 					},
 					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+						output({
+							type: "config_update",
+							model: toRpcPublicModel(session.model),
+							thinkingLevel: session.thinkingLevel,
+						});
 					},
 				});
 				if (builtinResult !== false) {
@@ -1110,7 +1230,7 @@ export async function runRpcMode(
 
 			case "get_state": {
 				const state: RpcSessionState = {
-					model: session.model,
+					model: toRpcPublicModel(session.model),
 					thinkingLevel: session.thinkingLevel,
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
@@ -1235,7 +1355,7 @@ export async function runRpcMode(
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 				}
 				await session.setModel(model);
-				return success(id, "set_model", model);
+				return success(id, "set_model", toRpcPublicModel(model));
 			}
 
 			case "cycle_model": {
@@ -1243,12 +1363,12 @@ export async function runRpcMode(
 				if (!result) {
 					return success(id, "cycle_model", null);
 				}
-				return success(id, "cycle_model", result);
+				return success(id, "cycle_model", { ...result, model: toRpcPublicModel(result.model) });
 			}
 
 			case "get_available_models": {
 				await session.modelRegistry.awaitBackgroundRefresh();
-				const models = session.getAvailableModels();
+				const models = session.getAvailableModels().map(model => toRpcPublicModel(model));
 				return success(id, "get_available_models", { models });
 			}
 
