@@ -8,6 +8,8 @@ describe("RPC public model serialization", () => {
 		const apiKey = "provider-api-key";
 		const nestedToken = "nested-transport-token";
 		const signingKey = "private-signing-key";
+		const opaqueBearer = "Bearer value-hidden-under-safe-key";
+		const thinking = { levels: ["low", "high"] };
 		const model = {
 			id: "empatra-test",
 			identity: { class: "openai", family: "gpt" },
@@ -21,10 +23,12 @@ describe("RPC public model serialization", () => {
 			cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.75 },
 			contextWindow: 200_000,
 			maxTokens: 16_384,
+			thinking,
 			compat: {
 				supportsStore: true,
 				extraBody: {
 					safeRoutingHint: "preserved",
+					routingHint: opaqueBearer,
 					nestedToken,
 					nested: {
 						Authorization: authorization,
@@ -54,6 +58,7 @@ describe("RPC public model serialization", () => {
 		expect(response).not.toContain(apiKey);
 		expect(response).not.toContain(nestedToken);
 		expect(response).not.toContain(signingKey);
+		expect(response).not.toContain(opaqueBearer);
 		expect(response).not.toContain("headers");
 		expect(response).not.toContain("apiKey");
 		expect(response).not.toContain("credentials");
@@ -68,15 +73,32 @@ describe("RPC public model serialization", () => {
 			supportsTools: true,
 			contextWindow: 200_000,
 			maxTokens: 16_384,
-			compat: {
-				supportsStore: true,
-				extraBody: {
-					safeRoutingHint: "preserved",
-					nested: { maxTokens: 4_096 },
-				},
-			},
+			thinking,
 		});
+		expect("compat" in publicModel).toBe(false);
 		expect(model.headers?.Authorization).toBe(authorization);
 		expect((model.compat as Record<string, unknown>).extraBody).toMatchObject({ nestedToken });
+	});
+
+	test("Empatra projection omits gateway transport and route-cost fields", () => {
+		const model = {
+			id: "managed",
+			identity: { class: "openai" },
+			name: "Managed",
+			api: "openai-responses",
+			provider: "empatra-gateway",
+			baseUrl: "http://127.0.0.1:4242/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 99, output: 199, cacheRead: 1, cacheWrite: 2 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		} as unknown as Model;
+
+		const publicModel = toRpcPublicModel(model, false);
+
+		expect(publicModel).toMatchObject({ id: "managed", provider: "empatra-gateway" });
+		expect("baseUrl" in publicModel).toBe(false);
+		expect("cost" in publicModel).toBe(false);
 	});
 });

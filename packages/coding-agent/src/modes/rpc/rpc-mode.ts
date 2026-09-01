@@ -54,6 +54,7 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcPublicModel,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
@@ -116,56 +117,54 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
-const RPC_SECRET_FIELD_PARTS = new Set([
-	"auth",
-	"authentication",
-	"authorization",
-	"bearer",
-	"cookie",
-	"credential",
-	"credentials",
-	"header",
-	"headers",
-	"jwt",
-	"oauth",
-	"password",
-	"secret",
-	"token",
+const EMPATRA_HOST_RPC_COMMANDS = new Set<RpcCommand["type"]>([
+	"negotiate_protocol",
+	"prompt",
+	"steer",
+	"follow_up",
+	"abort",
+	"abort_and_prompt",
+	"get_state",
+	"get_available_commands",
+	"set_model",
+	"get_available_models",
+	"set_thinking_level",
+	"set_steering_mode",
+	"set_follow_up_mode",
+	"set_interrupt_mode",
+	"compact",
+	"set_auto_compaction",
+	"set_auto_retry",
+	"abort_retry",
+	"get_session_stats",
+	"get_branch_messages",
+	"get_last_assistant_text",
+	"set_session_name",
+	"get_messages",
+	"get_messages_page",
 ]);
 
-function isRpcSecretField(key: string): boolean {
-	const parts = key
-		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-		.toLowerCase()
-		.split(/[^a-z0-9]+/)
-		.filter(Boolean);
-	if (parts.some(part => RPC_SECRET_FIELD_PARTS.has(part))) return true;
-	return parts.some(
-		(part, index) =>
-			part === "key" &&
-			["access", "api", "client", "encryption", "private", "secret", "session", "signing"].includes(
-				parts[index - 1] ?? "",
-			),
-	);
+function rpcCommandMessage(command: RpcCommand): string | undefined {
+	switch (command.type) {
+		case "prompt":
+		case "steer":
+		case "follow_up":
+		case "abort_and_prompt":
+			return command.message;
+		default:
+			return undefined;
+	}
 }
 
-function sanitizeRpcPublicMetadata(value: unknown, seen = new WeakSet<object>()): unknown {
-	if (Array.isArray(value)) {
-		if (seen.has(value)) return undefined;
-		seen.add(value);
-		return value.map(item => sanitizeRpcPublicMetadata(item, seen));
+/** Return a fail-closed policy error for RPC commands unavailable to the Empatra host. */
+export function validateEmpatraHostRpcCommand(command: RpcCommand): string | undefined {
+	if (!EMPATRA_HOST_RPC_COMMANDS.has(command.type)) {
+		return `RPC command '${command.type}' is unavailable in --empatra-host mode`;
 	}
-	if (!isRecord(value)) return value;
-	if (seen.has(value)) return undefined;
-	seen.add(value);
-
-	const sanitized: Record<string, unknown> = {};
-	for (const [key, nestedValue] of Object.entries(value)) {
-		if (isRpcSecretField(key)) continue;
-		const publicValue = sanitizeRpcPublicMetadata(nestedValue, seen);
-		if (publicValue !== undefined) sanitized[key] = publicValue;
+	if (rpcCommandMessage(command)?.trimStart().startsWith("/")) {
+		return "Slash commands are unavailable in --empatra-host mode";
 	}
-	return sanitized;
+	return undefined;
 }
 
 function sanitizeRpcPublicBaseUrl(baseUrl: string): string {
@@ -186,12 +185,12 @@ function sanitizeRpcPublicBaseUrl(baseUrl: string): string {
  *
  * Models may carry request headers and custom provider metadata. RPC consumers
  * only need stable selection and capability fields, so keep an explicit
- * allowlist and sanitize the extensible compat record recursively.
+ * allowlist and omit the extensible provider compatibility record entirely.
  */
-export function toRpcPublicModel(model: Model): Model;
-export function toRpcPublicModel(model: undefined): undefined;
-export function toRpcPublicModel(model: Model | undefined): Model | undefined;
-export function toRpcPublicModel(model: Model | undefined): Model | undefined {
+export function toRpcPublicModel(model: Model, exposeTransport?: boolean): RpcPublicModel;
+export function toRpcPublicModel(model: undefined, exposeTransport?: boolean): undefined;
+export function toRpcPublicModel(model: Model | undefined, exposeTransport?: boolean): RpcPublicModel | undefined;
+export function toRpcPublicModel(model: Model | undefined, exposeTransport = true): RpcPublicModel | undefined {
 	if (!model) return undefined;
 	return {
 		id: model.id,
@@ -206,34 +205,55 @@ export function toRpcPublicModel(model: Model | undefined): Model | undefined {
 		name: model.name,
 		api: model.api,
 		provider: model.provider,
-		baseUrl: sanitizeRpcPublicBaseUrl(model.baseUrl),
+		...(exposeTransport ? { baseUrl: sanitizeRpcPublicBaseUrl(model.baseUrl) } : {}),
 		reasoning: model.reasoning,
 		input: [...model.input],
 		...(model.supportsTools !== undefined ? { supportsTools: model.supportsTools } : {}),
-		cost: {
-			input: model.cost.input,
-			output: model.cost.output,
-			cacheRead: model.cost.cacheRead,
-			cacheWrite: model.cost.cacheWrite,
-			...(model.cost.longContext
-				? {
-						longContext: {
-							input: model.cost.longContext.input,
-							output: model.cost.longContext.output,
-							cacheRead: model.cost.longContext.cacheRead,
-							cacheWrite: model.cost.longContext.cacheWrite,
-							inputThreshold: model.cost.longContext.inputThreshold,
-							...(model.cost.longContext.inputThresholdInclusive !== undefined
-								? { inputThresholdInclusive: model.cost.longContext.inputThresholdInclusive }
-								: {}),
-						},
-					}
-				: {}),
-		},
+		...(exposeTransport
+			? {
+					cost: {
+						input: model.cost.input,
+						output: model.cost.output,
+						cacheRead: model.cost.cacheRead,
+						cacheWrite: model.cost.cacheWrite,
+						...(model.cost.longContext
+							? {
+									longContext: {
+										input: model.cost.longContext.input,
+										output: model.cost.longContext.output,
+										cacheRead: model.cost.longContext.cacheRead,
+										cacheWrite: model.cost.longContext.cacheWrite,
+										inputThreshold: model.cost.longContext.inputThreshold,
+										...(model.cost.longContext.inputThresholdInclusive !== undefined
+											? { inputThresholdInclusive: model.cost.longContext.inputThresholdInclusive }
+											: {}),
+									},
+								}
+							: {}),
+					},
+				}
+			: {}),
 		contextWindow: model.contextWindow,
 		maxTokens: model.maxTokens,
-		compat: sanitizeRpcPublicMetadata(model.compat) as Model["compat"],
+		...(model.thinking !== undefined ? { thinking: model.thinking } : {}),
 	};
+}
+
+function isEmpatraHostModel(model: Model): boolean {
+	if (model.provider !== "empatra-gateway" || model.api !== "openai-responses") return false;
+	try {
+		const url = new URL(model.baseUrl);
+		return (
+			url.protocol === "http:" &&
+			(url.hostname === "127.0.0.1" || url.hostname === "[::1]") &&
+			url.username === "" &&
+			url.password === "" &&
+			url.search === "" &&
+			url.hash === ""
+		);
+	} catch {
+		return false;
+	}
 }
 
 export async function tryRunRpcSkillCommand(
@@ -822,7 +842,9 @@ export async function runRpcMode(
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	subagentEventBus?: EventBus,
 	input: ReadableStream<Uint8Array> = claimRpcInput(),
+	options: { empatraHost?: boolean } = {},
 ): Promise<never> {
+	const empatraHost = options.empatraHost === true;
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
 	// process.stdout with no newline, which the reader merges with the next JSON line and
@@ -1100,7 +1122,7 @@ export async function runRpcMode(
 		output(event);
 	});
 
-	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
+	const getAvailableCommands = async () => (empatraHost ? [] : buildAvailableSlashCommands(session));
 	const reloadPluginState = async () => {
 		const cwd = session.sessionManager.getCwd();
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
@@ -1126,6 +1148,10 @@ export async function runRpcMode(
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
+		if (empatraHost) {
+			const policyError = validateEmpatraHostRpcCommand(command);
+			if (policyError) return error(id, command.type, policyError, "empatra_host_policy");
+		}
 
 		switch (command.type) {
 			case "negotiate_protocol": {
@@ -1158,7 +1184,7 @@ export async function runRpcMode(
 					notifyConfigChanged: async () => {
 						output({
 							type: "config_update",
-							model: toRpcPublicModel(session.model),
+							model: toRpcPublicModel(session.model, !empatraHost),
 							thinkingLevel: session.thinkingLevel,
 						});
 					},
@@ -1235,7 +1261,7 @@ export async function runRpcMode(
 
 			case "get_state": {
 				const state: RpcSessionState = {
-					model: toRpcPublicModel(session.model),
+					model: toRpcPublicModel(session.model, !empatraHost),
 					thinkingLevel: session.thinkingLevel,
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
@@ -1252,7 +1278,7 @@ export async function runRpcMode(
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
 					fastModeActive: session.isFastModeActive(),
 					messageCount: session.messages.length,
-					systemPrompt: session.systemPrompt,
+					...(!empatraHost ? { systemPrompt: session.systemPrompt } : {}),
 					dumpTools: session.agent.state.tools.map(tool => ({
 						name: tool.name,
 						description: tool.description,
@@ -1344,7 +1370,12 @@ export async function runRpcMode(
 
 			case "set_model": {
 				let models = session.getAvailableModels();
-				let model = models.find(m => m.provider === command.provider && m.id === command.modelId);
+				let model = models.find(
+					m =>
+						m.provider === command.provider &&
+						m.id === command.modelId &&
+						(!empatraHost || isEmpatraHostModel(m)),
+				);
 				if (!model) {
 					// Model not in the current catalog. Wait for in-flight
 					// background discovery before declaring it missing: on cold
@@ -1354,13 +1385,18 @@ export async function runRpcMode(
 					// queue is not stalled behind unrelated discovery.
 					await session.modelRegistry.awaitBackgroundRefresh();
 					models = session.getAvailableModels();
-					model = models.find(m => m.provider === command.provider && m.id === command.modelId);
+					model = models.find(
+						m =>
+							m.provider === command.provider &&
+							m.id === command.modelId &&
+							(!empatraHost || isEmpatraHostModel(m)),
+					);
 				}
 				if (!model) {
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 				}
 				await session.setModel(model);
-				return success(id, "set_model", toRpcPublicModel(model));
+				return success(id, "set_model", toRpcPublicModel(model, !empatraHost));
 			}
 
 			case "cycle_model": {
@@ -1368,12 +1404,15 @@ export async function runRpcMode(
 				if (!result) {
 					return success(id, "cycle_model", null);
 				}
-				return success(id, "cycle_model", { ...result, model: toRpcPublicModel(result.model) });
+				return success(id, "cycle_model", { ...result, model: toRpcPublicModel(result.model, !empatraHost) });
 			}
 
 			case "get_available_models": {
 				await session.modelRegistry.awaitBackgroundRefresh();
-				const models = session.getAvailableModels().map(model => toRpcPublicModel(model));
+				const models = session
+					.getAvailableModels()
+					.filter(model => !empatraHost || isEmpatraHostModel(model))
+					.map(model => toRpcPublicModel(model, !empatraHost));
 				return success(id, "get_available_models", { models });
 			}
 

@@ -29,6 +29,7 @@ import {
 	applyEmpatraHostPolicy,
 	applyEmpatraHostSessionPolicy,
 	reportUnrecognizedFlags,
+	validateEmpatraHostRuntimeEnvironment,
 	validateToolNames,
 } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -94,7 +95,7 @@ import {
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import { describeAuthBrokerStartupError } from "./session/auth-broker-config";
-import type { AuthStorage } from "./session/auth-storage";
+import { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
@@ -122,6 +123,7 @@ type RunRpcMode = (
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	subagentEventBus?: EventBus,
 	input?: ReadableStream<Uint8Array>,
+	options?: { empatraHost?: boolean },
 ) => Promise<never>;
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
@@ -1402,6 +1404,7 @@ export async function runRootCommand(
 		// Re-apply the pure policy at the execution boundary so SDK/programmatic
 		// callers cannot bypass the same validation performed by parseArgs().
 		const parsedArgs = applyEmpatraHostPolicy(parsed);
+		validateEmpatraHostRuntimeEnvironment(parsedArgs);
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
 		await logger.time("initTheme:initial", ensureTheme);
@@ -1490,11 +1493,15 @@ export async function runRootCommand(
 		// Auth and settings are independent; start both before awaiting either.
 		// A configured-but-unreachable auth broker still receives the actionable
 		// startup error below, while its cache/config I/O overlaps settings I/O.
-		const authStoragePromise = logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
+		const authStoragePromise = parsedArgs.empatraHost
+			? logger.time("authStorage:empatraHost", AuthStorage.create, ":memory:")
+			: logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
 		authStoragePromise.catch(() => {});
 		const settingsPromise = deps.settings
 			? Promise.resolve(deps.settings)
-			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
+			: parsedArgs.empatraHost
+				? Promise.resolve(Settings.isolated())
+				: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
 		settingsPromise.catch(() => {});
 		let authStorage: AuthStorage;
 		try {
@@ -1836,9 +1843,11 @@ export async function runRootCommand(
 		// env, then switch on the agent loop's telemetry hooks so traces, run-level
 		// metrics, and structured logs have source events to export. Content capture
 		// remains governed by OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
-		await logger.time("initTelemetryExport", initTelemetryExport);
-		if (isTelemetryExportEnabled()) {
-			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
+		if (!parsedArgs.empatraHost) {
+			await logger.time("initTelemetryExport", initTelemetryExport);
+			if (isTelemetryExportEnabled()) {
+				sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
+			}
 		}
 
 		// Handle CLI --api-key as runtime override (not persisted)
@@ -2047,7 +2056,9 @@ export async function runRootCommand(
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
-				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, subagentEventBus, rpcInput);
+				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, subagentEventBus, rpcInput, {
+					empatraHost: parsedArgs.empatraHost,
+				});
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 				const startupChangelog = await startupChangelogPromise;

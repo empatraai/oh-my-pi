@@ -348,11 +348,39 @@ export function applyEmpatraHostPolicy(args: Args): Args {
 	if (args.mode !== "rpc-ui") {
 		throw new CliUsageError("--empatra-host requires --mode rpc-ui");
 	}
+	if (!args.noSession) {
+		throw new CliUsageError("--empatra-host requires --no-session; Electron main owns durable thread state");
+	}
+	const selectedProvider = args.provider ?? args.model?.split("/", 1)[0];
+	if (!args.model || selectedProvider !== "empatra-gateway") {
+		throw new CliUsageError("--empatra-host requires an explicit empatra-gateway model");
+	}
+	if (!args.systemPrompt?.trim()) {
+		throw new CliUsageError("--empatra-host requires an explicit Empatra-owned --system-prompt");
+	}
 	if (args.autoApprove || args.approvalMode === "write" || args.approvalMode === "yolo") {
 		throw new CliUsageError("--empatra-host does not allow automatic or reduced tool approval");
 	}
 
 	const forbiddenInputs: Array<[string, unknown]> = [
+		["--add-dir", args.addDir],
+		["--allow-home", args.allowHome],
+		["--api-key", args.apiKey],
+		["--config", args.config],
+		["--continue", args.continue],
+		["--resume", args.resume],
+		["--fork", args.fork],
+		["--from-claude", args.fromClaude],
+		["--from-codex", args.fromCodex],
+		["--models", args.models],
+		["--smol", args.smol],
+		["--slow", args.slow],
+		["--plan", args.plan],
+		["--prewalk", args.prewalk],
+		["--plan-yolo", args.planYolo],
+		["--advisor", args.advisor],
+		["--external-thinking", args.externalThinking],
+		["--append-system-prompt", args.appendSystemPrompt],
 		["--extension/-e", args.extensions],
 		["--hook", args.hooks],
 		["--trusted-extension", args.trustedExtensions],
@@ -377,12 +405,44 @@ export function applyEmpatraHostPolicy(args: Args): Args {
 	};
 }
 
+/** Validate process isolation before host mode opens settings, auth, or session storage. */
+export function validateEmpatraHostRuntimeEnvironment(
+	args: Pick<Args, "empatraHost">,
+	environment: NodeJS.ProcessEnv = process.env,
+): void {
+	if (!args.empatraHost) return;
+	const agentDir = environment.PI_CODING_AGENT_DIR?.trim();
+	if (!agentDir || !path.isAbsolute(agentDir)) {
+		throw new CliUsageError("--empatra-host requires an absolute PI_CODING_AGENT_DIR");
+	}
+}
+
 /** Enforce the non-discovering SDK surface for Empatra Studio host sessions. */
 export function applyEmpatraHostSessionPolicy(
 	parsed: Pick<Args, "empatraHost" | "tools">,
 	options: CreateAgentSessionOptions,
 ): void {
 	if (!parsed.empatraHost) return;
+	const model = options.model;
+	if (model?.provider !== "empatra-gateway" || model.api !== "openai-responses") {
+		throw new CliUsageError("--empatra-host requires a resolved empatra-gateway/openai-responses model");
+	}
+	let gatewayUrl: URL;
+	try {
+		gatewayUrl = new URL(model.baseUrl);
+	} catch {
+		throw new CliUsageError("--empatra-host requires a valid loopback model gateway URL");
+	}
+	if (
+		gatewayUrl.protocol !== "http:" ||
+		(gatewayUrl.hostname !== "127.0.0.1" && gatewayUrl.hostname !== "[::1]") ||
+		gatewayUrl.username !== "" ||
+		gatewayUrl.password !== "" ||
+		gatewayUrl.search !== "" ||
+		gatewayUrl.hash !== ""
+	) {
+		throw new CliUsageError("--empatra-host model gateway must use HTTP loopback");
+	}
 	options.disableExtensionDiscovery = true;
 	options.additionalExtensionPaths = [];
 	options.preloadedCustomToolPaths = [];

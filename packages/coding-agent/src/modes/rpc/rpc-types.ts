@@ -21,6 +21,27 @@ import type {
 import type { TodoPhase } from "../../tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
 
+/** Credential-free model projection safe to expose to an embedding RPC host. */
+export type RpcPublicModel = Pick<
+	Model,
+	| "id"
+	| "identity"
+	| "name"
+	| "api"
+	| "provider"
+	| "reasoning"
+	| "input"
+	| "supportsTools"
+	| "contextWindow"
+	| "maxTokens"
+	| "thinking"
+> & {
+	/** Omitted in Empatra host mode: Electron main already owns the gateway address. */
+	baseUrl?: string;
+	/** Omitted in Empatra host mode to keep route cost out of the controller protocol. */
+	cost?: Model["cost"];
+};
+
 // ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
@@ -97,7 +118,7 @@ export type RpcCommand =
 // ============================================================================
 
 export interface RpcSessionState {
-	model?: Model;
+	model?: RpcPublicModel;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
 	isCompacting: boolean;
@@ -258,21 +279,21 @@ export type RpcResponse =
 			type: "response";
 			command: "set_model";
 			success: true;
-			data: Model;
+			data: RpcPublicModel;
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "cycle_model";
 			success: true;
-			data: { model: Model; thinkingLevel: ThinkingLevel | undefined; isScoped: boolean } | null;
+			data: { model: RpcPublicModel; thinkingLevel: ThinkingLevel | undefined; isScoped: boolean } | null;
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "get_available_models";
 			success: true;
-			data: { models: Model[] };
+			data: { models: RpcPublicModel[] };
 	  }
 
 	// Thinking

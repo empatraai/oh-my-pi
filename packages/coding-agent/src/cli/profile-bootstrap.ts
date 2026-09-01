@@ -59,6 +59,25 @@ export interface ProfileBootstrapResult {
 	aliasName?: string;
 }
 
+/** Reject profile/bootstrap side effects before host policy can be stripped from argv. */
+export function validateEmpatraHostBootstrap(
+	argv: readonly string[],
+	environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+	const enabled = argv.includes("--empatra-host");
+	if (!enabled) return false;
+	if (argv.some(arg => arg === "--profile" || arg.startsWith("--profile="))) {
+		throw new Error("--empatra-host does not allow --profile");
+	}
+	if (argv.some(arg => arg === "--alias" || arg.startsWith("--alias="))) {
+		throw new Error("--empatra-host does not allow --alias");
+	}
+	if (environment.OMP_PROFILE?.trim() || environment.PI_PROFILE?.trim()) {
+		throw new Error("--empatra-host does not allow inherited OMP_PROFILE or PI_PROFILE");
+	}
+	return true;
+}
+
 /**
  * Strip `--profile` / `--alias` from argv while preserving the surrounding
  * argument structure, returning the residual argv to hand to the launch parser

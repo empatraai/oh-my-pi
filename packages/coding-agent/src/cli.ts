@@ -29,7 +29,7 @@ import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
-import { extractProfileFlags } from "./cli/profile-bootstrap";
+import { extractProfileFlags, validateEmpatraHostBootstrap } from "./cli/profile-bootstrap";
 import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
@@ -342,7 +342,9 @@ async function runTinyWorker(): Promise<void> {
 /** Run the CLI with the given argv (no `process.argv` prefix). */
 export async function runCli(argv: string[]): Promise<void> {
 	let resolvedArgv = argv;
+	let empatraHostRequested = false;
 	try {
+		empatraHostRequested = validateEmpatraHostBootstrap(resolvedArgv);
 		const extracted = extractProfileFlags(resolvedArgv);
 		resolvedArgv = extracted.argv;
 		if (extracted.profile !== undefined) {
@@ -414,8 +416,10 @@ export async function runCli(argv: string[]): Promise<void> {
 	// like every other dependency in this entry module: a static `pi-ai` import
 	// would load the provider graph before profile bootstrap and on paths
 	// (`--version`, worker selectors) that never touch the network.
-	const { installGlobalProxyFetch } = await import("@oh-my-pi/pi-ai/utils/proxy");
-	installGlobalProxyFetch();
+	if (!empatraHostRequested) {
+		const { installGlobalProxyFetch } = await import("@oh-my-pi/pi-ai/utils/proxy");
+		installGlobalProxyFetch();
+	}
 
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();

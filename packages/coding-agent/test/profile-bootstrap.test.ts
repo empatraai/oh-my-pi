@@ -1,7 +1,26 @@
 import { describe, expect, it } from "bun:test";
 import { parseArgs } from "../src/cli/args";
 import { PROFILE_BOOTSTRAP_BOUNDARY_ARG } from "../src/cli/flag-tables";
-import { extractProfileFlags } from "../src/cli/profile-bootstrap";
+import { extractProfileFlags, validateEmpatraHostBootstrap } from "../src/cli/profile-bootstrap";
+
+describe("validateEmpatraHostBootstrap", () => {
+	it("rejects profile and alias side effects before launch parsing", () => {
+		expect(() => validateEmpatraHostBootstrap(["--empatra-host", "--profile", "work"], {})).toThrow(
+			"does not allow --profile",
+		);
+		expect(() => validateEmpatraHostBootstrap(["--empatra-host", "--alias=omp-work"], {})).toThrow(
+			"does not allow --alias",
+		);
+	});
+
+	it("rejects inherited profiles and reports whether host mode is active", () => {
+		expect(() => validateEmpatraHostBootstrap(["--empatra-host"], { OMP_PROFILE: "work" })).toThrow(
+			"does not allow inherited",
+		);
+		expect(validateEmpatraHostBootstrap(["--empatra-host"], {})).toBe(true);
+		expect(validateEmpatraHostBootstrap(["--version"], { OMP_PROFILE: "work" })).toBe(false);
+	});
+});
 
 describe("extractProfileFlags", () => {
 	it("extracts --profile without disturbing other tokens", () => {
