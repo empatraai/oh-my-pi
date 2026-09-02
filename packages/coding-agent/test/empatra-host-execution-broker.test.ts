@@ -4,6 +4,8 @@ import {
 	createEmpatraHostExecutionBroker,
 	createEmpatraHostExecutionBrokerTransport,
 	createFailClosedEmpatraHostExecutionBroker,
+	assertEmpatraHostExecutionBrokerCapability,
+	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY,
 	EMPATRA_HOST_EXECUTION_OPERATIONS,
 	EmpatraHostProtocolError,
@@ -25,6 +27,7 @@ const validRead = {
 describe("Empatra host execution broker seam", () => {
 	test("keeps the capability reserved until a real main-owned adapter is wired", () => {
 		expect(EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY).toBe("execution_broker.v1");
+		expect(EMPATRA_HOST_CAPABILITIES).not.toContain(EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY);
 		expect(EMPATRA_HOST_EXECUTION_OPERATIONS).toEqual([
 			"filesystem.read",
 			"filesystem.write",
@@ -110,6 +113,15 @@ describe("Empatra host execution broker seam", () => {
 		});
 	});
 
+	test("does not construct a transport until the main host negotiates its capability", () => {
+		expect(() => assertEmpatraHostExecutionBrokerCapability([])).toThrow("not negotiated");
+		expect(() =>
+			createEmpatraHostExecutionBrokerTransport({
+				emitRequest: async () => {},
+			}),
+		).toThrow("not negotiated");
+	});
+
 	test("validates executor identity and result bounds", async () => {
 		const calls: unknown[] = [];
 		const broker = createEmpatraHostExecutionBroker(async request => {
@@ -134,6 +146,7 @@ describe("Empatra host execution broker seam", () => {
 test("dispatches a bounded broker request as an ordered host event and resolves its response", async () => {
 	let emitted: EmpatraHostExecutionBrokerRequestEvent | undefined;
 	const transport = createEmpatraHostExecutionBrokerTransport({
+		capabilities: [EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY],
 		emitRequest: async event => {
 			emitted = event;
 		},

@@ -124,6 +124,20 @@ export interface EmpatraHostExecutionBrokerTransport {
 	dispose(): void;
 }
 
+/**
+ * Assert that this process has completed the capability negotiation required
+ * before constructing a broker transport. The OMP host does not advertise the
+ * capability today, so callers that omit the negotiated list fail closed.
+ */
+export function assertEmpatraHostExecutionBrokerCapability(capabilities: readonly string[]): void {
+	if (!capabilities.includes(EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY)) {
+		throw new EmpatraHostProtocolError(
+			"execution_broker_unavailable",
+			"OMP execution broker capability was not negotiated by the main host",
+		);
+	}
+}
+
 export interface EmpatraHostExecutionBroker {
 	readonly capability: EmpatraHostExecutionBrokerCapability;
 	execute(request: EmpatraHostExecutionRequest, signal?: AbortSignal): Promise<EmpatraHostExecutionResult>;
@@ -400,11 +414,14 @@ export function parseEmpatraHostExecutionBrokerResponse(value: unknown): Empatra
  */
 export function createEmpatraHostExecutionBrokerTransport(
 	options: Readonly<{
+		/** Capabilities returned by the main controller during handshake. */
+		capabilities?: readonly string[];
 		emitRequest: EmpatraHostExecutionRequestEmitter;
 		nextSequence?: (scope: EmpatraHostExecutionScope) => number;
 		requestTimeoutMs?: number;
 	}>,
 ): EmpatraHostExecutionBrokerTransport {
+	assertEmpatraHostExecutionBrokerCapability(options.capabilities ?? []);
 	const timeoutMs = options.requestTimeoutMs ?? 30_000;
 	if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > EMPATRA_HOST_MAX_EXECUTION_TIMEOUT_MS) {
 		throw new RangeError("requestTimeoutMs must be between 1 and the execution timeout limit");
