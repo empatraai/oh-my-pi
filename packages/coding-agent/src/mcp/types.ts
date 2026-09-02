@@ -187,6 +187,11 @@ export interface MCPImplementation {
 
 /** MCP client capabilities */
 export interface MCPClientCapabilities {
+	/** Server-to-client prompts, explicitly negotiated per supported mode. */
+	elicitation?: {
+		form?: Record<string, never>;
+		url?: Record<string, never>;
+	};
 	roots?: { listChanged?: boolean };
 	sampling?: Record<string, never>;
 	experimental?: Record<string, unknown>;

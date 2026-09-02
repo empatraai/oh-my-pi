@@ -39,6 +39,12 @@ import type {
 } from "./types";
 
 import { MCP_PROTOCOL_VERSION } from "./types";
+import {
+	elicitationCapabilities,
+	parseMCPCreateElicitationRequest,
+	validateMCPCreateElicitationResponse,
+	type MCPClientElicitationSupport,
+} from "./elicitation";
 
 /** Client info sent during initialization */
 const CLIENT_INFO = {
@@ -91,14 +97,17 @@ async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
 async function initializeConnection(
 	transport: MCPTransport,
 	options?: {
+		elicitation?: MCPClientElicitationSupport;
 		signal?: AbortSignal;
 		/** Called after notifications/initialized succeeds. */
 		onInitialized?: () => void | Promise<void>;
 	},
 ): Promise<MCPInitializeResult> {
+	const elicitation = elicitationCapabilities(options?.elicitation);
 	const params: MCPInitializeParams = {
 		protocolVersion: MCP_PROTOCOL_VERSION,
 		capabilities: {
+			...(elicitation === undefined ? {} : { elicitation }),
 			roots: { listChanged: false },
 		},
 		clientInfo: CLIENT_INFO,
@@ -138,6 +147,8 @@ export async function connectToServer(
 	name: string,
 	config: MCPServerConfig,
 	options?: {
+		/** Explicitly advertise and answer MCP `elicitation/create` requests. */
+		elicitation?: MCPClientElicitationSupport;
 		signal?: AbortSignal;
 		onNotification?: (method: string, params: unknown) => void;
 		onRequest?: (method: string, params: unknown) => Promise<unknown>;
@@ -156,9 +167,26 @@ export async function connectToServer(
 		// The initialize request declares roots capability, so we must respond to
 		// roots/list — even for short-lived test connections.
 		transport.onRequest = options?.onRequest ?? defaultRequestHandler;
+		const requestHandler = transport.onRequest;
+		const elicitationSupport = options?.elicitation;
+		if (elicitationSupport) {
+			transport.onRequest = async (method, params) => {
+				if (method !== "elicitation/create") return requestHandler?.(method, params);
+				const request = parseMCPCreateElicitationRequest(params);
+				if (
+					(request.mode === "form" && elicitationSupport.form !== true) ||
+					(request.mode === "url" && elicitationSupport.url !== true)
+				) {
+					throw Object.assign(new Error("MCP elicitation mode is not supported by this client"), { code: -32602 });
+				}
+				const response = await elicitationSupport.handler(request, { serverName: name });
+				return validateMCPCreateElicitationResponse(response, request);
+			};
+		}
 
 		try {
 			const initResult = await initializeConnection(transport, {
+				elicitation: options?.elicitation,
 				signal: options?.signal,
 				async onInitialized() {
 					// Open the optional GET SSE stream only after the initialized

@@ -37,6 +37,11 @@ import type { McpConnectionStatusEvent } from "./startup-events";
 
 export type McpCatalogChangeEvent = { serverName: string; kind: "resources" | "prompts" };
 
+/** Optional main/UI-owned responder for MCP server-initiated elicitation. */
+export interface MCPManagerOptions {
+	readonly elicitation?: import("./elicitation").MCPClientElicitationSupport;
+}
+
 import type { MCPToolDetails } from "./tool-bridge";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
@@ -54,6 +59,7 @@ import type {
 	MCPToolDefinition,
 	MCPTransport,
 } from "./types";
+import type { MCPClientElicitationSupport } from "./elicitation";
 import { MCPNotificationMethods } from "./types";
 
 type ToolLoadResult = {
@@ -240,11 +246,15 @@ export class MCPManager {
 	#reconnectHistory = new Map<string, number[]>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
+	readonly #elicitation?: MCPClientElicitationSupport;
 
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
-	) {}
+		options: MCPManagerOptions = {},
+	) {
+		this.#elicitation = options.elicitation;
+	}
 
 	/**
 	 * Register a listener for MCP connection lifecycle events
@@ -554,11 +564,12 @@ export class MCPManager {
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config);
 				return connectToServer(name, resolvedConfig, {
+					elicitation: this.#elicitation,
 					onNotification: (method, params) => {
 						this.#handleServerNotification(name, method, params);
 					},
 					onRequest: (method, params) => {
-						return this.#handleServerRequest(method, params);
+						return this.#handleServerRequest(name, method, params);
 					},
 				});
 			})().then(
@@ -830,7 +841,7 @@ export class MCPManager {
 	}
 
 	/** Handle server-to-client JSON-RPC requests (e.g. ping, roots/list). */
-	async #handleServerRequest(method: string, _params: unknown): Promise<unknown> {
+	async #handleServerRequest(_serverName: string, method: string, _params: unknown): Promise<unknown> {
 		switch (method) {
 			case "ping":
 				return {};
@@ -1192,11 +1203,12 @@ export class MCPManager {
 	): Promise<MCPServerConnection> {
 		const resolvedConfig = await this.#resolveAuthConfig(config);
 		const connection = await connectToServer(name, resolvedConfig, {
+			elicitation: this.#elicitation,
 			onNotification: (method, params) => {
 				this.#handleServerNotification(name, method, params);
 			},
 			onRequest: (method, params) => {
-				return this.#handleServerRequest(method, params);
+				return this.#handleServerRequest(name, method, params);
 			},
 		});
 

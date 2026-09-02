@@ -10,6 +10,8 @@ export * from "./client";
 // Config
 export * from "./config";
 export * from "./config-writer";
+// Server-to-client elicitation contracts
+export * from "./elicitation";
 // JSON-RPC (lightweight HTTP-based MCP calls)
 export { callMCP, parseSSE } from "./json-rpc";
 // Loader (for SDK integration)
