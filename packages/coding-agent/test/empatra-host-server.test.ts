@@ -37,7 +37,7 @@ function initializeCommand(): EmpatraHostInitializeCommand {
 				supportsTools: true,
 			},
 		],
-		protocolVersion: 5,
+		protocolVersion: 6,
 		sessionDirectory: "/tmp/empatra-omp-sessions",
 		type: "host_initialize",
 		workspaceRoots: ["/tmp/workspace"],
@@ -71,6 +71,9 @@ function runtime(overrides: Partial<EmpatraHostRuntime> = {}): EmpatraHostRuntim
 			return { cancelled: true };
 		},
 		async respondToInteraction() {
+			return { accepted: true };
+		},
+		async resolvePlan() {
 			return { accepted: true };
 		},
 		async forkThread() {
@@ -364,6 +367,39 @@ describe("Empatra host protocol server", () => {
 		expect(eventIndex).toBeGreaterThan(responseIndex);
 	});
 
+	test("dispatches plan resolution through the host-owned runtime boundary", async () => {
+		const actions: string[] = [];
+		const output: string[] = [];
+		await runEmpatraHostServer({
+			input: inputStream([
+				initializeCommand(),
+				{
+					action: "approve",
+					digest: `sha256:${"d".repeat(64)}`,
+					expectedGeneration: 2,
+					id: "plan-resolution-1",
+					requestId: "plan-request-1",
+					threadId: "thread-1",
+					turnId: "turn-1",
+					type: "plan_resolution",
+				},
+				{ id: "shutdown-plan-resolution", type: "host_shutdown" },
+			]),
+			runtime: runtime({
+				async resolvePlan(command) {
+					actions.push(command.action);
+					return { accepted: true, requestId: command.requestId };
+				},
+			}),
+			write: async frame => {
+				output.push(frame);
+			},
+		});
+		const frames = output.map(frame => JSON.parse(frame));
+		expect(actions).toEqual(["approve"]);
+		expect(frames.find(frame => frame.id === "plan-resolution-1")).toMatchObject({ success: true });
+	});
+
 	test("requires bootstrap before thread commands and shuts down cleanly", async () => {
 		let disposed = 0;
 		const output: string[] = [];
@@ -385,7 +421,7 @@ describe("Empatra host protocol server", () => {
 		});
 
 		const frames = output.map(frame => JSON.parse(frame));
-		expect(frames[0]).toMatchObject({ protocolVersion: 5, type: "host_ready" });
+		expect(frames[0]).toMatchObject({ protocolVersion: 6, type: "host_ready" });
 		expect(frames.find(frame => frame.id === "list-before-init")).toMatchObject({
 			code: "not_initialized",
 			success: false,

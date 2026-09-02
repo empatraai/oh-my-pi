@@ -108,6 +108,10 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 		return this.#requireRuntime().respondToInteraction(command);
 	}
 
+	resolvePlan(command: Extract<EmpatraHostCommand, { type: "plan_resolution" }>): Promise<unknown> {
+		return this.#requireRuntime().resolvePlan(command);
+	}
+
 	rollbackThread(command: Extract<EmpatraHostCommand, { type: "thread_rollback" }>): Promise<unknown> {
 		return this.#requireRuntime().rollbackThread(command);
 	}

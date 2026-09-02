@@ -5,6 +5,7 @@ import {
 	EMPATRA_HOST_MAX_FRAME_BYTES,
 	EMPATRA_HOST_MAX_HOST_TOOL_RESULT_BYTES,
 	EMPATRA_HOST_MAX_IMAGE_BYTES,
+	EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES,
 	EMPATRA_HOST_PROTOCOL_VERSION,
 	type EmpatraHostEvent,
 	type EmpatraHostInitializeCommand,
@@ -53,6 +54,9 @@ describe("Empatra host protocol", () => {
 
 	test("rejects remote gateways, duplicate models, and excess fields", () => {
 		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...validInitialize, protocolVersion: 1 }))).toThrow(
+			"host_initialize is invalid",
+		);
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...validInitialize, protocolVersion: 5 }))).toThrow(
 			"host_initialize is invalid",
 		);
 		expect(() =>
@@ -149,6 +153,39 @@ describe("Empatra host protocol", () => {
 				JSON.stringify({ id: "read-1", includeSecrets: true, threadId: "thread-1", type: "thread_read" }),
 			),
 		).toThrow("unknown fields");
+	});
+
+	test("parses v6 execution modes and digest-bound plan resolution", () => {
+		const digest = `sha256:${"b".repeat(64)}`;
+		const turn = {
+			expectedGeneration: 3,
+			id: "plan-turn-1",
+			message: "Составь план",
+			mode: "plan" as const,
+			threadId: "thread-1",
+			turnId: "turn-1",
+			type: "turn_start" as const,
+		};
+		expect(parseEmpatraHostCommand(JSON.stringify(turn))).toEqual(turn);
+		const resolution = {
+			action: "revise" as const,
+			digest,
+			expectedGeneration: 3,
+			feedback: "Добавь проверку миграции",
+			id: "plan-resolution-1",
+			requestId: "plan-request-1",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			type: "plan_resolution" as const,
+		};
+		expect(parseEmpatraHostCommand(JSON.stringify(resolution))).toEqual(resolution);
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...resolution, action: "approve", feedback: "" }))).toThrow(
+			"feedback is invalid",
+		);
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...resolution, digest: "sha256:bad" }))).toThrow(
+			"digest is invalid",
+		);
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...turn, mode: "unknown" }))).toThrow("mode is invalid");
 	});
 
 	test("accepts strict thread lifecycle commands and list filters", () => {
@@ -435,6 +472,26 @@ describe("Empatra host protocol", () => {
 				type: "host_ready",
 			}),
 		).toEndWith("\n");
+	});
+
+	test("bounds and validates plan proposal events before serialization", () => {
+		const planText = "# План\n\nПроверить контракт.";
+		const proposal = {
+			digest: `sha256:${Bun.SHA256.hash(planText, "hex")}`,
+			event: "plan_proposal" as const,
+			generation: 2,
+			planText,
+			requestId: "plan-request-1",
+			sequence: 1,
+			summary: "feature",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			type: "host_event" as const,
+		} satisfies EmpatraHostEvent;
+		expect(JSON.parse(serializeEmpatraHostFrame(proposal))).toEqual(proposal);
+		expect(() =>
+			serializeEmpatraHostFrame({ ...proposal, planText: "x".repeat(EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES + 1) }),
+		).toThrow("planText is invalid");
 	});
 
 	test("serializes the strict secret-free tool event contract", () => {

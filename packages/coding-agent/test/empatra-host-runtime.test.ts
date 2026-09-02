@@ -19,7 +19,10 @@ import {
 	type EmpatraHostToolCallFrame,
 	serializeEmpatraHostFrame,
 } from "../src/modes/empatra-host";
+import type { PlanApprovalDetails } from "../src/plan-mode/approved-plan";
+import type { PlanModeState } from "../src/plan-mode/state";
 import type { AgentSessionEvent } from "../src/session/agent-session-events";
+import type { PlanProposalHandler } from "../src/tools/resolve";
 
 const temporaryRoots: string[] = [];
 
@@ -49,7 +52,7 @@ function initializeCommand(workspace: string, sessionDirectory: string): Empatra
 				supportsTools: true,
 			},
 		],
-		protocolVersion: 5,
+		protocolVersion: 6,
 		sessionDirectory,
 		type: "host_initialize",
 		workspaceRoots: [workspace],
@@ -92,6 +95,9 @@ class FakeSession implements EmpatraHostSession {
 	onSteer?: (message: string) => Promise<void>;
 	rpcTools: AgentTool[] = [];
 	nativeToolNames: string[] = [];
+	planModeState?: PlanModeState;
+	planProposalHandler?: PlanProposalHandler;
+	planReferencePath?: string;
 
 	async abort(): Promise<void> {
 		this.onAbort?.();
@@ -108,6 +114,32 @@ class FakeSession implements EmpatraHostSession {
 
 	async prompt(): Promise<void> {
 		await this.onPrompt?.();
+	}
+
+	async preparePlanForReview(): Promise<{ details: PlanApprovalDetails }> {
+		return {
+			details: { planExists: true, planFilePath: "local://feature-plan.md", title: "feature" },
+		};
+	}
+
+	async readPlanFile(): Promise<string | null> {
+		return "# Feature plan\n\n1. Check the v6 contract.\n";
+	}
+
+	getPlanModeState(): PlanModeState | undefined {
+		return this.planModeState;
+	}
+
+	setPlanModeState(state: PlanModeState | undefined): void {
+		this.planModeState = state;
+	}
+
+	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
+		this.planProposalHandler = handler ?? undefined;
+	}
+
+	setPlanReferencePath(planFilePath: string): void {
+		this.planReferencePath = planFilePath;
 	}
 
 	getAllToolNames(): string[] {
@@ -281,6 +313,117 @@ await new Promise(() => {});`,
 			}),
 		).rejects.toMatchObject({ code: "invalid_request" });
 		await runtime.dispose();
+	});
+
+	test("emits a digest-bound plan proposal and applies native approval", async () => {
+		const host = await temporaryHost();
+		const proposal = Promise.withResolvers<Extract<EmpatraHostEvent, { event: "plan_proposal" }>>();
+		const session = new FakeSession();
+		session.onPrompt = async () => {
+			if (!session.planProposalHandler) throw new Error("plan proposal handler is missing");
+			await session.planProposalHandler("feature");
+		};
+		const runtime = new EmpatraHostAgentRuntime({ sessionFactory: async () => session });
+		runtime.setEventSink(async event => {
+			if (event.event === "plan_proposal") proposal.resolve(event);
+		});
+		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+		const created = (await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-plan-session",
+			mode: "plan",
+			modelId: "managed-model",
+			operationId: "operation-plan-session",
+			systemPrompt: "Empatra system prompt",
+			type: "thread_create",
+		})) as { generation: number; threadId: string };
+		const started = (await runtime.startTurn({
+			expectedGeneration: created.generation,
+			id: "start-plan-turn",
+			message: "Составь план",
+			mode: "plan",
+			threadId: created.threadId,
+			turnId: "plan-turn-1",
+			type: "turn_start",
+		})) as { generation: number; threadId: string; turnId: string };
+		const event = await proposal.promise;
+		expect(event.planText).toContain("Check the v6 contract");
+		expect(event.digest).toBe(`sha256:${Bun.SHA256.hash(event.planText, "hex")}`);
+		expect(event.generation).toBe(started.generation);
+		await expect(
+			runtime.resolvePlan({
+				action: "approve",
+				digest: event.digest,
+				expectedGeneration: event.generation,
+				id: "resolve-plan-1",
+				requestId: event.requestId,
+				threadId: event.threadId,
+				turnId: event.turnId,
+				type: "plan_resolution",
+			}),
+		).resolves.toMatchObject({ accepted: true, action: "approve" });
+		await new Promise(resolve => setTimeout(resolve, 10));
+		expect(session.planModeState).toBeUndefined();
+		expect(session.planReferencePath).toBe("local://feature-plan.md");
+		await runtime.dispose();
+	});
+
+	test("keeps plan mode on revise and closes it on dismiss", async () => {
+		for (const action of ["revise", "dismiss"] as const) {
+			const host = await temporaryHost();
+			const proposal = Promise.withResolvers<Extract<EmpatraHostEvent, { event: "plan_proposal" }>>();
+			const session = new FakeSession();
+			session.onPrompt = async () => {
+				if (!session.planProposalHandler) throw new Error("plan proposal handler is missing");
+				await session.planProposalHandler("feature");
+			};
+			const runtime = new EmpatraHostAgentRuntime({ sessionFactory: async () => session });
+			runtime.setEventSink(async event => {
+				if (event.event === "plan_proposal") proposal.resolve(event);
+			});
+			await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+			const created = (await runtime.startThread({
+				cwd: host.workspace,
+				id: `create-${action}-plan-session`,
+				mode: "plan",
+				modelId: "managed-model",
+				operationId: `operation-${action}-plan-session`,
+				systemPrompt: "Empatra system prompt",
+				type: "thread_create",
+			})) as { generation: number; threadId: string };
+			const turnPromise = runtime.startTurn({
+				expectedGeneration: created.generation,
+				id: `start-${action}-plan-turn`,
+				message: "Составь план",
+				mode: "plan",
+				threadId: created.threadId,
+				turnId: `${action}-plan-turn-1`,
+				type: "turn_start",
+			});
+			const event = await proposal.promise;
+			await expect(
+				runtime.resolvePlan({
+					action,
+					digest: event.digest,
+					expectedGeneration: event.generation,
+					feedback: action === "revise" ? "Уточнить шаги" : null,
+					id: `resolve-${action}-plan`,
+					requestId: event.requestId,
+					threadId: event.threadId,
+					turnId: event.turnId,
+					type: "plan_resolution",
+				}),
+			).resolves.toMatchObject({ accepted: true, action });
+			await turnPromise;
+			if (action === "revise") {
+				expect(session.planModeState?.enabled).toBe(true);
+				expect(session.planProposalHandler).toBeDefined();
+			} else {
+				expect(session.planModeState).toBeUndefined();
+				expect(session.planProposalHandler).toBeUndefined();
+			}
+			await runtime.dispose();
+		}
 	});
 
 	test("creates an injected OMP session once and durably reuses its operation id", async () => {

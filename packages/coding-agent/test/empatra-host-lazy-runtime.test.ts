@@ -13,7 +13,7 @@ const initializeCommand: EmpatraHostInitializeCommand = {
 	gatewayBaseUrl: "http://127.0.0.1:43123/v1",
 	id: "initialize",
 	models: [],
-	protocolVersion: 5,
+	protocolVersion: 6,
 	sessionDirectory: "/tmp/empatra-host-sessions",
 	type: "host_initialize",
 	workspaceRoots: ["/tmp"],

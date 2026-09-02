@@ -10,11 +10,15 @@ import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import type { ExtensionUIContext } from "../../extensibility/extensions/types";
 import type { Skill } from "../../extensibility/skills";
+import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
+import { readPlanFile } from "../../plan-mode/plan-files";
+import type { PlanModeState } from "../../plan-mode/state";
 import type { AgentSessionEvent } from "../../session/agent-session-events";
 import { BlobStore } from "../../session/blob-store";
 import type { SessionEntry } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
+import type { PlanProposalHandler } from "../../tools/resolve";
 import {
 	digestEmpatraHostAtomicInput,
 	digestEmpatraHostText,
@@ -48,7 +52,9 @@ import type {
 	EmpatraHostGoalSetCommand,
 	EmpatraHostImageDescriptor,
 	EmpatraHostInitializeCommand,
+	EmpatraHostMode,
 	EmpatraHostModel,
+	EmpatraHostPlanResolutionCommand,
 	EmpatraHostReasoningEffort,
 	EmpatraHostThreadCreateAndStartCommand,
 	EmpatraHostThreadCreateCommand,
@@ -66,6 +72,7 @@ import type {
 import {
 	EMPATRA_HOST_MAX_ASSISTANT_MESSAGES_PER_TURN,
 	EMPATRA_HOST_MAX_CONTENT_INDEX,
+	EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES,
 	EMPATRA_HOST_THREAD_READ_TARGET_BYTES,
 	projectEmpatraHostFailure,
 } from "./protocol";
@@ -108,6 +115,7 @@ const EMPATRA_THREAD_CONFIG_VERSION = 1 as const;
 const EMPATRA_THREAD_LIFECYCLE_ENTRY = "empatra.host.thread-lifecycle.v1";
 const EMPATRA_THREAD_LIFECYCLE_VERSION = 1 as const;
 const MAX_STREAM_EVENT_BYTES = 64 * 1024;
+const MAX_PLAN_PROPOSAL_EVENT_BYTES = EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES + 16 * 1024;
 const MAX_QUEUED_EVENT_BYTES = 4 * 1024 * 1024;
 const eventEncoder = new TextEncoder();
 
@@ -160,13 +168,43 @@ function createThreadSnapshotRevision(generation: number, leafId: string | null)
 	return digestEmpatraHostText(JSON.stringify([generation, leafId]));
 }
 
+function planProposalDigest(planText: string): string {
+	return `sha256:${digestEmpatraHostText(planText)}`;
+}
+
+function planDetails(value: unknown): PlanApprovalDetails {
+	if (
+		!value ||
+		typeof value !== "object" ||
+		!("planFilePath" in value) ||
+		!("title" in value) ||
+		!("planExists" in value) ||
+		typeof value.planFilePath !== "string" ||
+		typeof value.title !== "string" ||
+		value.planExists !== true
+	) {
+		throw new EmpatraHostProtocolError("plan_not_supported", "OMP returned an invalid plan proposal");
+	}
+	return {
+		planExists: true,
+		planFilePath: value.planFilePath,
+		title: value.title,
+	};
+}
+
 export interface EmpatraHostSession {
 	abort(options?: { goalReason?: "interrupted" | "internal"; reason?: string }): Promise<void>;
 	compact(customInstructions?: string): Promise<unknown>;
 	dispose(): Promise<void>;
 	getAllToolNames?(): string[];
 	prompt(message: string, options?: { images?: ImageContent[] }): Promise<unknown>;
+	preparePlanForReview?(title: string): Promise<{ details?: PlanApprovalDetails }>;
+	readPlanFile?(planFilePath: string): Promise<string | null>;
 	refreshRpcHostTools?(rpcTools: AgentTool[]): Promise<void>;
+	getPlanModeState?(): PlanModeState | undefined;
+	setPlanModeState?(state: PlanModeState | undefined): void;
+	setPlanProposalHandler?(handler: PlanProposalHandler | null): void;
+	setPlanReferencePath?(planFilePath: string): void;
 	steer(message: string, images?: ImageContent[]): Promise<void>;
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void;
 	setThinkingLevel?(level: ThinkingLevel): void;
@@ -319,6 +357,16 @@ interface ThreadHandle {
 	streamFailure?: Error;
 	threadId: string;
 	unsubscribe: () => void;
+}
+
+interface PendingPlanResolution {
+	digest: string;
+	generation: number;
+	reject: (error: Error) => void;
+	resolve: (command: EmpatraHostPlanResolutionCommand) => void;
+	requestId: string;
+	threadId: string;
+	turnId: string;
 }
 
 interface IndexedThread {
@@ -691,7 +739,20 @@ async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions):
 		dispose: session.dispose.bind(session),
 		getAllToolNames: session.getAllToolNames.bind(session),
 		prompt: session.prompt.bind(session),
+		preparePlanForReview: session.preparePlanForReview.bind(session),
+		readPlanFile: planFilePath =>
+			readPlanFile(planFilePath, {
+				cwd: options.cwd,
+				localProtocolOptions: {
+					getArtifactsDir: () => options.sessionManager.getArtifactsDir(),
+					getSessionId: () => options.sessionManager.getSessionId(),
+				},
+			}),
 		refreshRpcHostTools: session.refreshRpcHostTools.bind(session),
+		getPlanModeState: session.getPlanModeState.bind(session),
+		setPlanModeState: session.setPlanModeState.bind(session),
+		setPlanProposalHandler: session.setPlanProposalHandler.bind(session),
+		setPlanReferencePath: session.setPlanReferencePath.bind(session),
 		setThinkingLevel: session.setThinkingLevel.bind(session),
 		setToolUIContext,
 		steer: session.steer.bind(session),
@@ -714,6 +775,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	readonly #interruptedTurns = new Set<string>();
 	readonly #operationCommandTails = new Map<string, Promise<void>>();
 	readonly #threadCommandTails = new Map<string, Promise<void>>();
+	readonly #pendingPlanResolutions = new Map<string, PendingPlanResolution>();
 	#hostToolCatalog?: Readonly<{ revision: string; tools: readonly EmpatraHostToolDefinition[] }>;
 
 	constructor(options: { maxResidentThreads?: number; sessionFactory?: EmpatraHostSessionFactory } = {}) {
@@ -892,6 +954,43 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		});
 	}
 
+	#rejectPendingPlanResolutions(threadId: string, turnId: string, error: Error): void {
+		for (const [requestId, pending] of this.#pendingPlanResolutions) {
+			if (pending.threadId !== threadId || pending.turnId !== turnId) continue;
+			this.#pendingPlanResolutions.delete(requestId);
+			pending.reject(error);
+		}
+	}
+
+	async resolvePlan(command: EmpatraHostPlanResolutionCommand): Promise<unknown> {
+		return await this.#withThreadCommand(command.threadId, async () => {
+			const state = this.#registry.get(command.threadId);
+			const activeTurn = state?.handle.activeTurn;
+			if (
+				!state ||
+				state.generation !== command.expectedGeneration ||
+				state.activeTurnId !== command.turnId ||
+				!activeTurn ||
+				activeTurn.generation !== command.expectedGeneration ||
+				activeTurn.turnId !== command.turnId
+			) {
+				throw new EmpatraHostProtocolError("stale_turn", "Plan resolution does not match the active turn");
+			}
+			const pending = this.#pendingPlanResolutions.get(command.requestId);
+			if (!pending) throw new EmpatraHostProtocolError("plan_not_pending", "Plan proposal is no longer pending");
+			if (
+				pending.digest !== command.digest ||
+				pending.generation !== command.expectedGeneration ||
+				pending.threadId !== command.threadId ||
+				pending.turnId !== command.turnId
+			) {
+				throw new EmpatraHostProtocolError("identity_mismatch", "Plan proposal identity validation failed");
+			}
+			pending.resolve(command);
+			return { accepted: true, action: command.action, requestId: command.requestId };
+		});
+	}
+
 	async startThread(command: EmpatraHostThreadCreateCommand): Promise<unknown> {
 		const runtime = this.#requireInitialized();
 		const existing = await this.#findThreadByOperation(command.operationId);
@@ -899,6 +998,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			const state = await this.#registry.open(existing.id, () => this.#openThread(existing.path));
 			const requestedCwd = await runtime.policy.requireCwd(command.cwd);
 			this.#assertCreateMatches(state.handle.sessionManager, command, requestedCwd);
+			this.#configureMode(state.handle, command.mode);
 			return { generation: state.generation, threadId: state.handle.threadId };
 		}
 		const cwd = await runtime.policy.requireCwd(command.cwd);
@@ -917,6 +1017,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			await sessionManager.ensureOnDisk();
 			return this.#createHandle(sessionManager, model, command.systemPrompt);
 		});
+		this.#configureMode(state.handle, command.mode);
 		this.#recordThreadMetadata(state.handle, command.operationId, false);
 		return { generation: state.generation, threadId: state.handle.threadId };
 	}
@@ -924,11 +1025,12 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	async startThreadAndTurn(command: EmpatraHostThreadCreateAndStartCommand): Promise<unknown> {
 		return this.#withOperationCommand(command.operationId, async () => {
 			let inputSha256 = digestEmpatraHostAtomicInput([
-				"empatra.host.create-and-start.v4",
+				"empatra.host.create-and-start.v5",
 				command.operationId,
 				command.cwd,
 				command.modelId,
 				command.systemPrompt,
+				command.mode ?? "",
 				command.reasoningEffort ?? "",
 				command.message,
 				digestEmpatraHostImageDescriptors(command.images),
@@ -936,7 +1038,12 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			]);
 			const runtime = this.#requireInitialized();
 			const existing = runtime.atomicOperationStore.get(command.operationId);
-			if (existing && existing.inputSha256 !== inputSha256 && command.reasoningEffort == null) {
+			if (
+				existing &&
+				existing.inputSha256 !== inputSha256 &&
+				command.reasoningEffort == null &&
+				command.mode == null
+			) {
 				const legacyInputSha256 = digestEmpatraHostAtomicInput([
 					"empatra.host.create-and-start.v3",
 					command.operationId,
@@ -963,6 +1070,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					command.message,
 					command.images,
 					command.reasoningEffort ?? null,
+					command.mode,
 				);
 			}
 			const preparedImages = await prepareEmpatraHostImages(
@@ -975,6 +1083,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					cwd: command.cwd,
 					id: command.id,
 					modelId: command.modelId,
+					...(command.mode === undefined ? {} : { mode: command.mode }),
 					operationId: command.operationId,
 					systemPrompt: command.systemPrompt,
 					type: "thread_create",
@@ -992,6 +1101,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					command.message,
 					command.images,
 					command.reasoningEffort ?? null,
+					command.mode,
 					preparedImages,
 				);
 			} catch (error) {
@@ -1051,6 +1161,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					}
 				});
 				this.#assertForkMatches(state.handle.sessionManager, command, cwd);
+				this.#configureMode(state.handle, command.mode);
 				this.#recordThreadMetadata(state.handle, command.operationId, false);
 				return { generation: state.generation, threadId: state.handle.threadId };
 			} finally {
@@ -1062,9 +1173,10 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	async forkThreadAndStart(command: EmpatraHostThreadForkAndStartCommand): Promise<unknown> {
 		return this.#withOperationCommand(command.operationId, async () => {
 			let inputSha256 = digestEmpatraHostAtomicInput([
-				"empatra.host.fork-and-start.v4",
+				"empatra.host.fork-and-start.v5",
 				command.operationId,
 				command.threadId,
+				command.mode ?? "",
 				command.cwd ?? "",
 				command.reasoningEffort ?? "",
 				command.message,
@@ -1073,7 +1185,12 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			]);
 			const runtime = this.#requireInitialized();
 			const existing = runtime.atomicOperationStore.get(command.operationId);
-			if (existing && existing.inputSha256 !== inputSha256 && command.reasoningEffort == null) {
+			if (
+				existing &&
+				existing.inputSha256 !== inputSha256 &&
+				command.reasoningEffort == null &&
+				command.mode == null
+			) {
 				const legacyInputSha256 = digestEmpatraHostAtomicInput([
 					"empatra.host.fork-and-start.v3",
 					command.operationId,
@@ -1099,6 +1216,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					command.message,
 					command.images,
 					command.reasoningEffort ?? null,
+					command.mode,
 				);
 			}
 			const preparedImages = await this.#prepareImagesForThread(command.threadId, command.images);
@@ -1108,6 +1226,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					id: command.id,
 					operationId: command.operationId,
 					threadId: command.threadId,
+					...(command.mode === undefined ? {} : { mode: command.mode }),
 					type: "thread_fork",
 				})) as { generation: number; threadId: string };
 				const receipt = this.#requireInitialized().atomicOperationStore.accept({
@@ -1123,6 +1242,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					command.message,
 					command.images,
 					command.reasoningEffort ?? null,
+					command.mode,
 					preparedImages,
 				);
 			} catch (error) {
@@ -1394,6 +1514,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		return this.#withThreadCommand(command.threadId, async () => {
 			const handle = this.#registry.requireActiveTurn(command.threadId, command.turnId, command.expectedGeneration);
 			this.#interactionBroker.cancelThread(command.threadId);
+			this.#rejectPendingPlanResolutions(
+				command.threadId,
+				command.turnId,
+				new EmpatraHostProtocolError("plan_not_pending", "Plan proposal was interrupted"),
+			);
 			this.#interruptedTurns.add(this.#turnKey(command.threadId, command.turnId));
 			try {
 				await handle.session.abort({ goalReason: "interrupted", reason: "Interrupted by Empatra Studio" });
@@ -1461,6 +1586,10 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	async dispose(): Promise<void> {
 		this.#disposing = true;
 		this.#interactionBroker.dispose();
+		for (const pending of this.#pendingPlanResolutions.values()) {
+			pending.reject(new EmpatraHostProtocolError("host_disposed", "OMP host is shutting down"));
+		}
+		this.#pendingPlanResolutions.clear();
 		this.#hostToolsConnection.dispose();
 		for (const handle of this.#handles) {
 			for (const admission of handle.activeTurn?.imageAdmissions ?? []) admission.release();
@@ -1509,6 +1638,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		promptError: unknown,
 	): Promise<void> {
 		this.#interactionBroker.cancelThread(command.threadId);
+		this.#rejectPendingPlanResolutions(
+			command.threadId,
+			command.turnId,
+			new EmpatraHostProtocolError("plan_not_pending", "Plan proposal is no longer active"),
+		);
 		let error = promptError;
 		const atomicOperation = handle.activeTurn?.atomicOperation;
 		for (const admission of handle.activeTurn?.imageAdmissions ?? []) admission.release();
@@ -1605,6 +1739,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				return this.#openThread(session.path);
 			});
 			this.#applyReasoningEffort(state.handle, command.reasoningEffort ?? null);
+			this.#configureMode(state.handle, command.mode);
 			const activeGeneration = this.#registry.beginTurn(
 				command.threadId,
 				command.turnId,
@@ -1708,6 +1843,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		message: string,
 		descriptors: readonly EmpatraHostImageDescriptor[] | undefined,
 		reasoningEffort: EmpatraHostReasoningEffort | null,
+		mode: EmpatraHostMode | undefined,
 		preloadedImages?: EmpatraHostPreparedImages,
 	): Promise<{ generation: number; operationId: string; threadId: string; turnId: string }> {
 		return this.#withThreadCommand(receipt.threadId, async () => {
@@ -1759,6 +1895,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 						expectedGeneration: state.generation,
 						id: receipt.operationId,
 						message,
+						...(mode === undefined ? {} : { mode }),
 						reasoningEffort,
 						threadId: receipt.threadId,
 						turnId: receipt.turnId,
@@ -2181,6 +2318,106 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		});
 	}
 
+	async #handlePlanProposal(handle: ThreadHandle, title: string) {
+		const activeTurn = handle.activeTurn;
+		if (
+			!activeTurn?.acceptingEvents ||
+			!handle.session.preparePlanForReview ||
+			!handle.session.readPlanFile ||
+			!handle.session.getPlanModeState
+		) {
+			throw new EmpatraHostProtocolError("plan_not_supported", "OMP plan proposal lifecycle is unavailable");
+		}
+		const review = await handle.session.preparePlanForReview(title);
+		const details = planDetails(review.details);
+		const planContent = await handle.session.readPlanFile(details.planFilePath);
+		if (planContent === null) {
+			throw new EmpatraHostProtocolError("plan_not_supported", "OMP plan artifact is unavailable");
+		}
+		const requestId = `plan-${Bun.randomUUIDv7()}`;
+		const summary = details.title;
+		const digest = planProposalDigest(planContent);
+		const {
+			promise: resolutionPromise,
+			resolve: resolveResolution,
+			reject: rejectResolution,
+		} = Promise.withResolvers<EmpatraHostPlanResolutionCommand>();
+		this.#pendingPlanResolutions.set(requestId, {
+			digest,
+			generation: activeTurn.generation,
+			reject: rejectResolution,
+			resolve: resolveResolution,
+			requestId,
+			threadId: handle.threadId,
+			turnId: activeTurn.turnId,
+		});
+		activeTurn.sequence += 1;
+		try {
+			await this.#enqueueEvent(handle, {
+				digest,
+				event: "plan_proposal",
+				generation: activeTurn.generation,
+				planText: planContent,
+				requestId,
+				sequence: activeTurn.sequence,
+				summary,
+				threadId: handle.threadId,
+				turnId: activeTurn.turnId,
+				type: "host_event",
+			});
+			const resolution = await resolutionPromise;
+			if (resolution.action === "approve") {
+				handle.session.setPlanReferencePath?.(details.planFilePath);
+				handle.session.setPlanProposalHandler?.(null);
+				handle.session.setPlanModeState?.(undefined);
+				return {
+					content: [{ type: "text" as const, text: "Plan approved; continue with implementation." }],
+					details,
+				};
+			}
+			if (resolution.action === "revise") {
+				const state = handle.session.getPlanModeState();
+				if (state?.enabled && state.planFilePath !== details.planFilePath && handle.session.setPlanModeState) {
+					handle.session.setPlanModeState({ ...state, planFilePath: details.planFilePath });
+				}
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Plan revision requested${resolution.feedback ? `: ${resolution.feedback}` : "."} Update the plan and propose it again.`,
+						},
+					],
+					details,
+				};
+			}
+			handle.session.setPlanProposalHandler?.(null);
+			handle.session.setPlanModeState?.(undefined);
+			return { content: [{ type: "text" as const, text: "Plan dismissed; return to the caller." }], details };
+		} finally {
+			this.#pendingPlanResolutions.delete(requestId);
+		}
+	}
+
+	#configureMode(handle: ThreadHandle, mode: EmpatraHostMode | undefined): void {
+		if (mode === undefined) return;
+		if (mode !== "plan") {
+			handle.session.setPlanProposalHandler?.(null);
+			handle.session.setPlanModeState?.(undefined);
+			return;
+		}
+		if (!handle.session.setPlanModeState || !handle.session.setPlanProposalHandler) {
+			throw new EmpatraHostProtocolError("plan_not_supported", "OMP plan mode is unavailable for this session");
+		}
+		const previous = handle.session.getPlanModeState?.();
+		handle.session.setPlanModeState({
+			enabled: true,
+			planFilePath: previous?.planFilePath ?? "local://PLAN.md",
+			workflow: previous?.workflow ?? "parallel",
+			reentry: previous !== undefined,
+		});
+		handle.session.setPlanProposalHandler(title => this.#handlePlanProposal(handle, title));
+	}
+
 	#forwardSessionEvent(handle: ThreadHandle, event: AgentSessionEvent): void {
 		const activeTurn = handle.activeTurn;
 		if (!activeTurn?.acceptingEvents) return;
@@ -2420,7 +2657,8 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	#enqueueEvent(handle: ThreadHandle, event: EmpatraHostEvent): Promise<void> {
 		if (handle.streamFailure) return Promise.reject(handle.streamFailure);
 		const bytes = eventEncoder.encode(JSON.stringify(event)).byteLength;
-		if (bytes > MAX_STREAM_EVENT_BYTES) {
+		const maxEventBytes = event.event === "plan_proposal" ? MAX_PLAN_PROPOSAL_EVENT_BYTES : MAX_STREAM_EVENT_BYTES;
+		if (bytes > maxEventBytes) {
 			handle.streamFailure = new EmpatraHostProtocolError("event_backpressure", "Empatra host event is too large");
 			this.#failToolStream(handle);
 			return Promise.reject(handle.streamFailure);

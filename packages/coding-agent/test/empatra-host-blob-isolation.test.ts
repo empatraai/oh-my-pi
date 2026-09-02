@@ -70,7 +70,7 @@ function initializeCommand(workspace: string, sessionDirectory: string): Empatra
 				supportsTools: true,
 			},
 		],
-		protocolVersion: 5,
+		protocolVersion: 6,
 		sessionDirectory,
 		type: "host_initialize",
 		workspaceRoots: [workspace],

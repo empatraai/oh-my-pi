@@ -23,6 +23,7 @@ export interface EmpatraHostRuntime {
 	handleHostToolCancel(command: Extract<EmpatraHostCommand, { type: "host_tool_cancel" }>): void;
 	handleHostToolResult(command: Extract<EmpatraHostCommand, { type: "host_tool_result" }>): void;
 	noteInteractionActivity(command: Extract<EmpatraHostCommand, { type: "interaction_activity" }>): Promise<unknown>;
+	resolvePlan(command: Extract<EmpatraHostCommand, { type: "plan_resolution" }>): Promise<unknown>;
 	cancelInteraction(command: Extract<EmpatraHostCommand, { type: "interaction_cancel" }>): Promise<unknown>;
 	respondToInteraction(command: Extract<EmpatraHostCommand, { type: "interaction_respond" }>): Promise<unknown>;
 	interruptTurn(command: Extract<EmpatraHostCommand, { type: "turn_interrupt" }>): Promise<unknown>;
@@ -89,7 +90,11 @@ function commandActivationBarrier(command: EmpatraHostCommand): ActivationBarrie
 			turnId: command.turnId,
 		};
 	}
-	if (command.type === "interaction_respond" || command.type === "interaction_cancel") {
+	if (
+		command.type === "interaction_respond" ||
+		command.type === "interaction_cancel" ||
+		command.type === "plan_resolution"
+	) {
 		return {
 			bytes: 0,
 			key: `interaction:${command.id}`,
@@ -228,6 +233,8 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 				return options.runtime.cancelInteraction(command);
 			case "interaction_respond":
 				return options.runtime.respondToInteraction(command);
+			case "plan_resolution":
+				return options.runtime.resolvePlan(command);
 			case "host_tools_replace":
 				return options.runtime.replaceHostTools(command);
 			case "host_tool_cancel":

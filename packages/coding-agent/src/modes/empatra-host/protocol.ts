@@ -7,7 +7,7 @@ import type {
 	EmpatraHostUserInputResponse,
 } from "./interaction-broker";
 
-export const EMPATRA_HOST_PROTOCOL_VERSION = 5 as const;
+export const EMPATRA_HOST_PROTOCOL_VERSION = 6 as const;
 export const EMPATRA_HOST_MAX_FRAME_BYTES = 1024 * 1024;
 export const EMPATRA_HOST_MAX_MODELS = 1024;
 export const EMPATRA_HOST_MAX_WORKSPACE_ROOTS = 128;
@@ -24,6 +24,8 @@ export const EMPATRA_HOST_MAX_IMAGES = 16;
 export const EMPATRA_HOST_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const EMPATRA_HOST_MAX_IMAGE_BYTES_TOTAL = 64 * 1024 * 1024;
 export const EMPATRA_HOST_MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
+export const EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES = 512 * 1024;
+export const EMPATRA_HOST_MAX_PLAN_SUMMARY_BYTES = 4 * 1024;
 export const EMPATRA_HOST_THREAD_READ_TARGET_BYTES = 896 * 1024;
 
 const textEncoder = new TextEncoder();
@@ -60,6 +62,9 @@ export interface EmpatraHostSkill {
  * OMP's `off`; the host intentionally does not accept ambient OMP selectors.
  */
 export type EmpatraHostReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Explicit host-owned execution mode with a typed proposal/resolution lifecycle. */
+export type EmpatraHostMode = "default" | "plan";
 
 export type EmpatraHostImageMimeType = "image/gif" | "image/jpeg" | "image/png" | "image/webp";
 
@@ -110,6 +115,7 @@ export interface EmpatraHostThreadCreateCommand {
 	cwd: string;
 	id: string;
 	modelId: string;
+	mode?: EmpatraHostMode;
 	operationId: string;
 	systemPrompt: string;
 	type: "thread_create";
@@ -126,6 +132,7 @@ export interface EmpatraHostThreadCreateAndStartCommand extends Omit<EmpatraHost
 export interface EmpatraHostThreadForkCommand {
 	cwd?: string;
 	id: string;
+	mode?: EmpatraHostMode;
 	operationId: string;
 	threadId: string;
 	type: "thread_fork";
@@ -306,6 +313,7 @@ export interface EmpatraHostTurnStartCommand {
 	id: string;
 	images?: EmpatraHostImageDescriptor[];
 	message: string;
+	mode?: EmpatraHostMode;
 	reasoningEffort?: EmpatraHostReasoningEffort | null;
 	threadId: string;
 	turnId: string;
@@ -325,6 +333,7 @@ export interface EmpatraHostTurnSteerCommand {
 	id: string;
 	images?: EmpatraHostImageDescriptor[];
 	message: string;
+	mode?: EmpatraHostMode;
 	threadId: string;
 	turnId: string;
 	type: "turn_steer";
@@ -354,6 +363,18 @@ export interface EmpatraHostInteractionActivityCommand extends EmpatraHostIntera
 	type: "interaction_activity";
 }
 
+export interface EmpatraHostPlanResolutionCommand {
+	action: "approve" | "dismiss" | "revise";
+	digest: string;
+	expectedGeneration: number;
+	feedback?: string | null;
+	id: string;
+	requestId: string;
+	threadId: string;
+	turnId: string;
+	type: "plan_resolution";
+}
+
 export interface EmpatraHostShutdownCommand {
 	id: string;
 	type: "host_shutdown";
@@ -367,6 +388,7 @@ export type EmpatraHostCommand =
 	| EmpatraHostInteractionActivityCommand
 	| EmpatraHostInteractionCancelCommand
 	| EmpatraHostInteractionRespondCommand
+	| EmpatraHostPlanResolutionCommand
 	| EmpatraHostToolsReplaceCommand
 	| EmpatraHostToolCancelFrame
 	| EmpatraHostToolResultFrame
@@ -456,6 +478,20 @@ export interface EmpatraHostInteractionRequestedEvent {
 	type: "host_event";
 }
 
+/** A durable, digest-bound plan proposal emitted before execution can begin. */
+export interface EmpatraHostPlanProposalEvent {
+	digest: string;
+	event: "plan_proposal";
+	generation: number;
+	planText: string;
+	requestId: string;
+	sequence: number;
+	summary: string;
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+}
+
 export interface EmpatraHostToolFileChange {
 	diff: string;
 	diffTruncated: boolean;
@@ -533,6 +569,7 @@ export interface EmpatraHostToolExecutionEndEvent extends EmpatraHostToolEventBa
 
 export type EmpatraHostEvent =
 	| EmpatraHostInteractionRequestedEvent
+	| EmpatraHostPlanProposalEvent
 	| EmpatraHostToolExecutionEndEvent
 	| EmpatraHostToolExecutionStartEvent
 	| EmpatraHostToolExecutionUpdateEvent
@@ -593,6 +630,8 @@ const SAFE_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
 	not_initialized: "OMP host is not initialized",
 	operation_conflict: "The operation id is already bound to different inputs",
 	atomic_operation_uncertain: "OMP cannot safely replay an accepted atomic operation",
+	plan_not_supported: "OMP plan mode is not enabled for this host",
+	plan_not_pending: "OMP plan proposal is no longer pending",
 	rollback_unavailable: "OMP cannot roll back the requested number of turns",
 	runtime_error: "OMP host operation failed",
 	server_busy: "OMP host command queue is full",
@@ -764,6 +803,25 @@ function interactionDigest(value: unknown): string {
 		throw new EmpatraHostProtocolError("invalid_request", "digest is invalid");
 	}
 	return value;
+}
+
+function optionalMode(value: unknown): EmpatraHostMode | undefined {
+	if (value === undefined) return undefined;
+	if (value === "default" || value === "plan") return value;
+	throw new EmpatraHostProtocolError("invalid_request", "mode is invalid");
+}
+
+function planResolutionFeedback(value: unknown): string | null | undefined {
+	if (value === undefined || value === null) return value;
+	return boundedText(value, "feedback", 1, EMPATRA_HOST_MAX_PLAN_SUMMARY_BYTES);
+}
+
+function planProposalField(value: unknown, field: string, maxLength: number): string {
+	return boundedText(value, field, 1, maxLength);
+}
+
+function planTextDigest(planText: string): string {
+	return `sha256:${Bun.SHA256.hash(planText, "hex")}`;
 }
 
 function catalogRevision(value: unknown): string {
@@ -1148,6 +1206,45 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				turnId: identifier(parsed.turnId, "turnId"),
 				type: "interaction_respond",
 			};
+		case "plan_resolution":
+			if (
+				!hasOnlyKeys(parsed, [
+					"action",
+					"digest",
+					"expectedGeneration",
+					"feedback",
+					"id",
+					"requestId",
+					"threadId",
+					"turnId",
+					"type",
+				]) ||
+				(parsed.action !== "approve" && parsed.action !== "dismiss" && parsed.action !== "revise")
+			) {
+				throw new EmpatraHostProtocolError("invalid_request", "plan_resolution is invalid");
+			}
+			{
+				const feedback = planResolutionFeedback(parsed.feedback);
+				if (parsed.action === "revise" && !feedback) {
+					throw new EmpatraHostProtocolError("invalid_request", "feedback is required for plan revision");
+				}
+				return {
+					action: parsed.action,
+					digest: interactionDigest(parsed.digest),
+					expectedGeneration: boundedInteger(
+						parsed.expectedGeneration,
+						"expectedGeneration",
+						1,
+						Number.MAX_SAFE_INTEGER,
+					),
+					...(feedback === undefined ? {} : { feedback }),
+					id,
+					requestId: identifier(parsed.requestId, "requestId"),
+					threadId: identifier(parsed.threadId, "threadId"),
+					turnId: identifier(parsed.turnId, "turnId"),
+					type: "plan_resolution",
+				};
+			}
 		case "thread_list":
 			if (!hasOnlyKeys(parsed, ["archived", "id", "limit", "offset", "searchTerm", "type"])) {
 				throw new EmpatraHostProtocolError("invalid_request", "thread_list contains unknown fields");
@@ -1223,12 +1320,13 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				type: "thread_rollback",
 			};
 		case "thread_fork":
-			if (!hasOnlyKeys(parsed, ["cwd", "id", "operationId", "threadId", "type"])) {
+			if (!hasOnlyKeys(parsed, ["cwd", "id", "mode", "operationId", "threadId", "type"])) {
 				throw new EmpatraHostProtocolError("invalid_request", "thread_fork contains unknown fields");
 			}
 			return {
 				...(parsed.cwd === undefined ? {} : { cwd: absolutePath(parsed.cwd, "cwd") }),
 				id,
+				...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
 				operationId: identifier(parsed.operationId, "operationId"),
 				threadId: identifier(parsed.threadId, "threadId"),
 				type: "thread_fork",
@@ -1255,12 +1353,13 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				type: "thread_read",
 			};
 		case "thread_create":
-			if (!hasOnlyKeys(parsed, ["cwd", "id", "modelId", "operationId", "systemPrompt", "type"])) {
+			if (!hasOnlyKeys(parsed, ["cwd", "id", "mode", "modelId", "operationId", "systemPrompt", "type"])) {
 				throw new EmpatraHostProtocolError("invalid_request", "thread_create contains unknown fields");
 			}
 			return {
 				cwd: absolutePath(parsed.cwd, "cwd"),
 				id,
+				...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
 				modelId: identifier(parsed.modelId, "modelId"),
 				operationId: identifier(parsed.operationId, "operationId"),
 				systemPrompt: boundedText(parsed.systemPrompt, "systemPrompt", 1, 262_144),
@@ -1273,6 +1372,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					"id",
 					"images",
 					"message",
+					"mode",
 					"modelId",
 					"operationId",
 					"reasoningEffort",
@@ -1290,6 +1390,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					id,
 					...(images ? { images } : {}),
 					message: promptMessage(parsed.message, images),
+					...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
 					modelId: identifier(parsed.modelId, "modelId"),
 					operationId: identifier(parsed.operationId, "operationId"),
 					...(parsed.reasoningEffort === undefined
@@ -1307,6 +1408,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					"id",
 					"images",
 					"message",
+					"mode",
 					"operationId",
 					"reasoningEffort",
 					"threadId",
@@ -1323,6 +1425,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					id,
 					...(images ? { images } : {}),
 					message: promptMessage(parsed.message, images),
+					...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
 					operationId: identifier(parsed.operationId, "operationId"),
 					...(parsed.reasoningEffort === undefined
 						? {}
@@ -1339,6 +1442,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					"id",
 					"images",
 					"message",
+					"mode",
 					"reasoningEffort",
 					"threadId",
 					"turnId",
@@ -1359,6 +1463,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					id,
 					...(images ? { images } : {}),
 					message: promptMessage(parsed.message, images),
+					...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
 					...(parsed.reasoningEffort === undefined
 						? {}
 						: { reasoningEffort: optionalReasoningEffort(parsed.reasoningEffort) }),
@@ -1384,7 +1489,18 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				type: "turn_interrupt",
 			};
 		case "turn_steer":
-			if (!hasOnlyKeys(parsed, ["expectedGeneration", "id", "images", "message", "threadId", "turnId", "type"])) {
+			if (
+				!hasOnlyKeys(parsed, [
+					"expectedGeneration",
+					"id",
+					"images",
+					"message",
+					"mode",
+					"threadId",
+					"turnId",
+					"type",
+				])
+			) {
 				throw new EmpatraHostProtocolError("invalid_request", "turn_steer contains unknown fields");
 			}
 			{
@@ -1399,6 +1515,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					id,
 					...(images ? { images } : {}),
 					message: promptMessage(parsed.message, images),
+					...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
 					threadId: identifier(parsed.threadId, "threadId"),
 					turnId: identifier(parsed.turnId, "turnId"),
 					type: "turn_steer",
@@ -1412,6 +1529,19 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 export function serializeEmpatraHostFrame(
 	frame: EmpatraHostEvent | EmpatraHostReadyFrame | EmpatraHostResponse | EmpatraHostToolOutboundFrame,
 ): string {
+	if (frame.type === "host_event" && frame.event === "plan_proposal") {
+		interactionDigest(frame.digest);
+		boundedInteger(frame.generation, "generation", 1, Number.MAX_SAFE_INTEGER);
+		boundedInteger(frame.sequence, "sequence", 1, Number.MAX_SAFE_INTEGER);
+		identifier(frame.requestId, "requestId");
+		identifier(frame.threadId, "threadId");
+		identifier(frame.turnId, "turnId");
+		planProposalField(frame.planText, "planText", EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES);
+		if (frame.digest !== planTextDigest(frame.planText)) {
+			throw new EmpatraHostProtocolError("identity_mismatch", "Plan proposal digest does not match its content");
+		}
+		planProposalField(frame.summary, "summary", EMPATRA_HOST_MAX_PLAN_SUMMARY_BYTES);
+	}
 	const serialized = JSON.stringify(frame);
 	if (textEncoder.encode(serialized).byteLength > EMPATRA_HOST_MAX_FRAME_BYTES) {
 		throw new EmpatraHostProtocolError("frame_too_large", "Host response exceeds the physical frame limit");
