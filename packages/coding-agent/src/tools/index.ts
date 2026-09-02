@@ -667,6 +667,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// ordinary sessions, so this cannot widen their tool surface.
 	if (session.subagentRpcBroker?.capability === EMPATRA_HOST_SUBAGENT_CAPABILITY) {
 		allTools.task = sessionForTask => new EmpatraHostSubagentTool(sessionForTask);
+	} else if (restrictToolNames && requestedTools.includes("task")) {
+		// Never fall back to OMP's in-process TaskTool in a restricted host
+		// session: an explicit but unnegotiated request must fail closed.
+		delete allTools.task;
 	}
 	const isToolAllowed = (name: string) => {
 		// Never in the default set. Explicitly activatable while goal.enabled and
