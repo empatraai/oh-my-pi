@@ -413,6 +413,39 @@ await new Promise(() => {});`,
 		await runtime.dispose();
 	});
 
+	test("revokes an explicit extension when its staged bytes change during the host lifecycle", async () => {
+		const host = await temporaryHost();
+		const extensionPath = path.join(host.sessions, "runtime", "extensions", "revocable.ts");
+		await mkdir(path.dirname(extensionPath), { recursive: true });
+		const original = "export default () => undefined;\n";
+		await writeFile(extensionPath, original, "utf8");
+		const extensionSha256 = createHash("sha256").update(original).digest("hex");
+		const runtime = new EmpatraHostAgentRuntime({ sessionFactory: async () => new FakeSession() });
+		await runtime.initialize({
+			...initializeCommand(host.workspace, host.sessions),
+			extensions: [{ filePath: extensionPath, id: "revocable", sha256: extensionSha256 }],
+		});
+		await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-revocable-session",
+			modelId: "managed-model",
+			operationId: "operation-revocable-session",
+			systemPrompt: "Empatra system prompt",
+			type: "thread_create",
+		});
+
+		await writeFile(extensionPath, "export default () => 'changed';\n", "utf8");
+		await expect(runtime.startThread({
+			cwd: host.workspace,
+			id: "create-revoked-session",
+			modelId: "managed-model",
+			operationId: "operation-revoked-session",
+			systemPrompt: "Empatra system prompt",
+			type: "thread_create",
+		})).rejects.toMatchObject({ code: "invalid_request" });
+		await runtime.dispose();
+	});
+
 	test("rejects extension modules outside private storage or with a wrong digest", async () => {
 		const host = await temporaryHost();
 		const outsidePath = path.join(host.root, "outside.ts");
