@@ -135,6 +135,7 @@ type TurnStartCommand = Extract<EmpatraHostCommand, { type: "turn_start" }>;
 type TurnSteerCommand = Extract<EmpatraHostCommand, { type: "turn_steer" }>;
 
 interface PersistedThreadConfig {
+	mode?: EmpatraHostMode;
 	modelId: string;
 	operationId: string;
 	systemPrompt: string;
@@ -403,6 +404,7 @@ function parsePersistedThreadConfig(value: unknown): PersistedThreadConfig | und
 	if (
 		!isRecord(value) ||
 		value.version !== EMPATRA_THREAD_CONFIG_VERSION ||
+		(value.mode !== undefined && value.mode !== "default" && value.mode !== "plan") ||
 		typeof value.modelId !== "string" ||
 		typeof value.operationId !== "string" ||
 		typeof value.systemPrompt !== "string"
@@ -410,6 +412,7 @@ function parsePersistedThreadConfig(value: unknown): PersistedThreadConfig | und
 		return undefined;
 	}
 	return {
+		...(value.mode === undefined ? {} : { mode: value.mode }),
 		modelId: value.modelId,
 		operationId: value.operationId,
 		systemPrompt: value.systemPrompt,
@@ -997,8 +1000,9 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		if (existing) {
 			const state = await this.#registry.open(existing.id, () => this.#openThread(existing.path));
 			const requestedCwd = await runtime.policy.requireCwd(command.cwd);
+			const config = findThreadConfig(state.handle.sessionManager);
 			this.#assertCreateMatches(state.handle.sessionManager, command, requestedCwd);
-			this.#configureMode(state.handle, command.mode);
+			this.#configureMode(state.handle, command.mode ?? config.mode);
 			return { generation: state.generation, threadId: state.handle.threadId };
 		}
 		const cwd = await runtime.policy.requireCwd(command.cwd);
@@ -1009,6 +1013,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				enableFileBlobGarbageCollection: true,
 			});
 			sessionManager.appendCustomEntry(EMPATRA_THREAD_CONFIG_ENTRY, {
+				...(command.mode === undefined ? {} : { mode: command.mode }),
 				modelId: command.modelId,
 				operationId: command.operationId,
 				systemPrompt: command.systemPrompt,
@@ -1137,6 +1142,9 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					let persisted = false;
 					try {
 						forked.appendCustomEntry(EMPATRA_THREAD_CONFIG_ENTRY, {
+							...(command.mode === undefined && sourceConfig.mode === undefined
+								? {}
+								: { mode: command.mode ?? sourceConfig.mode }),
 							modelId: sourceConfig.modelId,
 							operationId: command.operationId,
 							systemPrompt: sourceConfig.systemPrompt,
@@ -1161,7 +1169,8 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					}
 				});
 				this.#assertForkMatches(state.handle.sessionManager, command, cwd);
-				this.#configureMode(state.handle, command.mode);
+				const config = findThreadConfig(state.handle.sessionManager);
+				this.#configureMode(state.handle, command.mode ?? config.mode);
 				this.#recordThreadMetadata(state.handle, command.operationId, false);
 				return { generation: state.generation, threadId: state.handle.threadId };
 			} finally {
@@ -2080,6 +2089,8 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		const requestedCwd = command.cwd ? await this.#requireInitialized().policy.requireCwd(command.cwd) : undefined;
 		const state = await this.#registry.open(session.id, () => this.#openThread(session.path));
 		this.#assertForkMatches(state.handle.sessionManager, command, requestedCwd);
+		const config = findThreadConfig(state.handle.sessionManager);
+		this.#configureMode(state.handle, command.mode ?? config.mode);
 		return { generation: state.generation, threadId: state.handle.threadId };
 	}
 
@@ -2092,6 +2103,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		if (
 			config.operationId !== command.operationId ||
 			manager.getHeader()?.parentSession !== command.threadId ||
+			(command.mode !== undefined && (config.mode ?? "default") !== command.mode) ||
 			(requestedCwd !== undefined && path.resolve(manager.getCwd()) !== requestedCwd)
 		) {
 			throw new EmpatraHostProtocolError(
@@ -2107,6 +2119,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			config.operationId !== command.operationId ||
 			config.modelId !== command.modelId ||
 			config.systemPrompt !== command.systemPrompt ||
+			(config.mode ?? "default") !== (command.mode ?? "default") ||
 			path.resolve(manager.getCwd()) !== requestedCwd
 		) {
 			throw new EmpatraHostProtocolError(

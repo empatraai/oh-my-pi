@@ -452,6 +452,9 @@ await new Promise(() => {});`,
 
 		expect(second).toEqual(first);
 		expect(options).toHaveLength(1);
+		await expect(runtime.startThread({ ...create, id: "create-plan-conflict", mode: "plan" })).rejects.toMatchObject({
+			code: "operation_conflict",
+		});
 		expect(options[0]?.capability).toBe("c".repeat(48));
 		expect(options[0]?.model).toMatchObject({
 			api: "openai-responses",
