@@ -1041,6 +1041,168 @@ await new Promise(() => {});`,
 		await runtime.dispose();
 	});
 
+	test("pages v2 history by newest complete turns with page-local turn metadata", async () => {
+		const host = await temporaryHost();
+		let options: EmpatraHostSessionFactoryOptions | undefined;
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async input => {
+				options = input;
+				return new FakeSession();
+			},
+		});
+		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+		const created = (await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-read-v2",
+			modelId: "managed-model",
+			operationId: "operation-read-v2",
+			systemPrompt: "System",
+			type: "thread_create",
+		})) as { threadId: string };
+		if (!options) throw new Error("Expected session factory options");
+		const turnIds: string[] = [];
+		for (let index = 1; index <= 3; index += 1) {
+			turnIds.push(
+				options.sessionManager.appendMessage({
+					content: `prompt-${index}`,
+					role: "user",
+					timestamp: Date.now() + index,
+				}),
+			);
+			options.sessionManager.appendMessage(assistantMessage([{ text: `answer-${index}`, type: "text" }]));
+		}
+		await options.sessionManager.flush();
+
+		const first = (await runtime.readThread({
+			id: "read-v2-first",
+			limit: 1,
+			pagination: "turns-v2",
+			threadId: created.threadId,
+			type: "thread_read",
+		})) as {
+			messages: Array<{ blocks: Array<{ text?: string }> }>;
+			nextCursor: string | null;
+			paginationVersion: number;
+			snapshotRevision: string;
+			turns: Array<{ id: string }>;
+		};
+		expect(first.paginationVersion).toBe(2);
+		expect(first.turns.map(turn => turn.id)).toEqual([turnIds[2]]);
+		expect(first.messages.flatMap(message => message.blocks.map(block => block.text))).toEqual([
+			"prompt-3",
+			"answer-3",
+		]);
+		expect(first.nextCursor).toBeString();
+		if (!first.nextCursor) throw new Error("Expected the v2 cursor");
+
+		const second = (await runtime.readThread({
+			cursor: first.nextCursor,
+			id: "read-v2-second",
+			limit: 1,
+			threadId: created.threadId,
+			type: "thread_read",
+		})) as {
+			messages: Array<{ blocks: Array<{ text?: string }> }>;
+			nextCursor: string | null;
+			turns: Array<{ id: string }>;
+		};
+		expect(second.turns.map(turn => turn.id)).toEqual([turnIds[1]]);
+		expect(second.messages.flatMap(message => message.blocks.map(block => block.text))).toEqual([
+			"prompt-2",
+			"answer-2",
+		]);
+		expect(second.nextCursor).toBeString();
+
+		await runtime.dispose();
+	});
+
+	test("keeps a multi-message legacy turn atomic in v2 and rejects stale revision and generation cursors", async () => {
+		const host = await temporaryHost();
+		let options: EmpatraHostSessionFactoryOptions | undefined;
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async input => {
+				options = input;
+				return new FakeSession();
+			},
+		});
+		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+		const created = (await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-read-v2-atomic",
+			modelId: "managed-model",
+			operationId: "operation-read-v2-atomic",
+			systemPrompt: "System",
+			type: "thread_create",
+		})) as { threadId: string };
+		if (!options) throw new Error("Expected session factory options");
+		options.sessionManager.appendMessage({ content: "single-turn", role: "user", timestamp: Date.now() });
+		for (let index = 1; index <= 4; index += 1) {
+			options.sessionManager.appendMessage(assistantMessage([{ text: `part-${index}`, type: "text" }]));
+		}
+		options.sessionManager.appendMessage({ content: "next-turn", role: "user", timestamp: Date.now() + 1 });
+		options.sessionManager.appendMessage(assistantMessage([{ text: "next-answer", type: "text" }]));
+		await options.sessionManager.flush();
+		const first = (await runtime.readThread({
+			id: "read-v2-atomic-first",
+			limit: 1,
+			pagination: "turns-v2",
+			threadId: created.threadId,
+			type: "thread_read",
+		})) as { messages: unknown[]; nextCursor: string | null; snapshotRevision: string };
+		expect(first.messages).toHaveLength(2);
+		expect(first.nextCursor).toBeString();
+		if (!first.nextCursor) throw new Error("Expected the v2 atomic cursor");
+		const older = (await runtime.readThread({
+			cursor: first.nextCursor,
+			id: "read-v2-atomic-older",
+			limit: 1,
+			threadId: created.threadId,
+			type: "thread_read",
+		})) as { messages: unknown[]; nextCursor: string | null };
+		expect(older.messages).toHaveLength(5);
+		expect(older.nextCursor).toBeNull();
+
+		options.sessionManager.appendMessage(assistantMessage([{ text: "revision-drift", type: "text" }]));
+		await options.sessionManager.flush();
+		await expect(
+			runtime.readThread({
+				cursor: first.nextCursor,
+				id: "read-v2-revision-stale",
+				limit: 1,
+				threadId: created.threadId,
+				type: "thread_read",
+			}),
+		).rejects.toMatchObject({ code: "stale_cursor" });
+
+		const withCursor = (await runtime.readThread({
+			id: "read-v2-generation-first",
+			limit: 1,
+			pagination: "turns-v2",
+			threadId: created.threadId,
+			type: "thread_read",
+		})) as { nextCursor: string | null };
+		expect(withCursor.nextCursor).toBeString();
+		if (!withCursor.nextCursor) throw new Error("Expected a generation-fenced cursor");
+		await runtime.startTurn({
+			expectedGeneration: 0,
+			id: "generation-drift-start",
+			message: "generation drift",
+			threadId: created.threadId,
+			turnId: "generation-drift-turn",
+			type: "turn_start",
+		});
+		await expect(
+			runtime.readThread({
+				cursor: withCursor.nextCursor,
+				id: "read-v2-generation-stale",
+				limit: 1,
+				threadId: created.threadId,
+				type: "thread_read",
+			}),
+		).rejects.toMatchObject({ code: "stale_cursor" });
+		await runtime.dispose();
+	});
+
 	test("keeps thread read pages below the response byte budget while advancing the cursor", async () => {
 		const host = await temporaryHost();
 		let options: EmpatraHostSessionFactoryOptions | undefined;

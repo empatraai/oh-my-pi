@@ -329,6 +329,23 @@ describe("Empatra host protocol", () => {
 		).toThrow("unknown fields");
 	});
 
+	test("opts into strict turn-aligned thread read pagination", () => {
+		const command = {
+			id: "read-v2-1",
+			limit: 1,
+			pagination: "turns-v2",
+			threadId: "thread-1",
+			type: "thread_read",
+		} as const;
+		expect(parseEmpatraHostCommand(JSON.stringify(command))).toEqual(command);
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...command, pagination: "messages-v1" }))).toThrow(
+			"pagination is invalid",
+		);
+		expect(() =>
+			parseEmpatraHostCommand(JSON.stringify({ ...command, pagination: "turns-v2", pageSize: 1 })),
+		).toThrow("unknown fields");
+	});
+
 	test("accepts strict atomic, steer, rollback, and opaque read commands", () => {
 		expect(
 			parseEmpatraHostCommand(

@@ -176,6 +176,11 @@ export interface EmpatraHostThreadReadCommand {
 	cursor?: string;
 	id: string;
 	limit: number;
+	/**
+	 * Opts into turn-aligned, newest-first pagination. Omitting this field
+	 * preserves the legacy message-offset contract for older controllers.
+	 */
+	pagination?: "turns-v2";
 	threadId: string;
 	type: "thread_read";
 }
@@ -1400,13 +1405,17 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				type: "thread_rename",
 			};
 		case "thread_read":
-			if (!hasOnlyKeys(parsed, ["cursor", "id", "limit", "threadId", "type"])) {
+			if (!hasOnlyKeys(parsed, ["cursor", "id", "limit", "pagination", "threadId", "type"])) {
 				throw new EmpatraHostProtocolError("invalid_request", "thread_read contains unknown fields");
+			}
+			if (parsed.pagination !== undefined && parsed.pagination !== "turns-v2") {
+				throw new EmpatraHostProtocolError("invalid_request", "pagination is invalid");
 			}
 			return {
 				...(parsed.cursor === undefined ? {} : { cursor: boundedString(parsed.cursor, "cursor", 1, 4096) }),
 				id,
 				limit: boundedInteger(parsed.limit, "limit", 1, 200),
+				...(parsed.pagination === undefined ? {} : { pagination: parsed.pagination }),
 				threadId: identifier(parsed.threadId, "threadId"),
 				type: "thread_read",
 			};

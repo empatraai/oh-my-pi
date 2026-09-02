@@ -80,7 +80,7 @@ import {
 } from "./protocol";
 import type { EmpatraHostRuntime } from "./server";
 import { type EmpatraHostThreadMetadata, EmpatraHostThreadMetadataStore } from "./thread-metadata-store";
-import { projectThreadMessages } from "./thread-projection";
+import { type EmpatraHostProjectedMessage, projectThreadMessages } from "./thread-projection";
 import { EmpatraHostThreadRegistry } from "./thread-registry";
 import { rollbackEmpatraHostThread } from "./thread-rollback";
 import {
@@ -160,7 +160,7 @@ interface TurnCursor {
 	v: 1;
 }
 
-interface ThreadReadCursor {
+interface LegacyThreadReadCursor {
 	generation: number;
 	leafId: string | null;
 	messageCount: number;
@@ -168,6 +168,28 @@ interface ThreadReadCursor {
 	threadId: string;
 	v: 1;
 }
+
+interface TurnAlignedThreadReadCursor {
+	generation: number;
+	leafId: string | null;
+	order: "desc";
+	snapshotRevision: string;
+	threadId: string;
+	turnCount: number;
+	turnOffset: number;
+	v: 2;
+}
+
+type ThreadReadCursor = LegacyThreadReadCursor | TurnAlignedThreadReadCursor;
+
+interface TurnAlignedThreadReadProjection {
+	readonly bytes: number;
+	readonly messagesByTurn: ReadonlyMap<string, readonly EmpatraHostProjectedMessage[]>;
+	readonly turns: readonly EmpatraHostTurnSummary[];
+}
+
+const MAX_THREAD_READ_PROJECTION_CACHE_ENTRIES = 8;
+const MAX_THREAD_READ_PROJECTION_CACHE_BYTES = 32 * 1024 * 1024;
 
 function createThreadSnapshotRevision(generation: number, leafId: string | null): string {
 	return digestEmpatraHostText(JSON.stringify([generation, leafId]));
@@ -551,6 +573,38 @@ function projectThreadTurns(entries: readonly SessionEntry[], activeTurnId: stri
 	return turns;
 }
 
+function buildTurnAlignedThreadReadProjection(
+	entries: readonly SessionEntry[],
+	activeTurnId: string | null,
+): TurnAlignedThreadReadProjection {
+	const messages = projectThreadMessages(entries);
+	const turns = projectThreadTurns(entries, activeTurnId);
+	const knownTurnIds = new Set(turns.map(turn => turn.id));
+	const messagesByTurn = new Map<string, EmpatraHostProjectedMessage[]>();
+	let bytes = eventEncoder.encode(JSON.stringify(turns)).byteLength;
+
+	for (const message of messages) {
+		if (!message.turnId || !knownTurnIds.has(message.turnId)) {
+			throw new EmpatraHostProtocolError(
+				"turn_state_corrupt",
+				"Projected thread message does not belong to a durable turn",
+			);
+		}
+		const page = messagesByTurn.get(message.turnId) ?? [];
+		page.push(message);
+		messagesByTurn.set(message.turnId, page);
+		// This is deliberately an upper-bound estimate. It avoids retaining a
+		// projection whose payload would make the bounded cache unbounded while
+		// keeping the authoritative page path available as a safe fallback.
+		bytes = Math.min(
+			MAX_THREAD_READ_PROJECTION_CACHE_BYTES + 1,
+			bytes + eventEncoder.encode(JSON.stringify(message)).byteLength,
+		);
+	}
+
+	return { bytes, messagesByTurn, turns };
+}
+
 function persistedTurnPhase(
 	manager: SessionManager,
 	turnId: string,
@@ -663,25 +717,59 @@ function decodeThreadReadCursor(encoded: string): ThreadReadCursor {
 		const bytes = Buffer.from(encoded, "base64url");
 		if (bytes.toString("base64url") !== encoded) throw new Error("Non-canonical cursor");
 		const value: unknown = JSON.parse(bytes.toString("utf8"));
+		if (!isRecord(value) || typeof value.v !== "number") throw new Error("Invalid cursor payload");
+		if (value.v === 1) {
+			if (
+				!hasExactKeys(value, ["generation", "leafId", "messageCount", "offset", "threadId", "v"]) ||
+				!nonNegativeInteger(value.generation) ||
+				(value.leafId !== null && typeof value.leafId !== "string") ||
+				!nonNegativeInteger(value.messageCount) ||
+				!nonNegativeInteger(value.offset) ||
+				typeof value.threadId !== "string"
+			) {
+				throw new Error("Invalid cursor payload");
+			}
+			return {
+				generation: value.generation,
+				leafId: value.leafId,
+				messageCount: value.messageCount,
+				offset: value.offset,
+				threadId: value.threadId,
+				v: 1,
+			};
+		}
 		if (
-			!isRecord(value) ||
-			!hasExactKeys(value, ["generation", "leafId", "messageCount", "offset", "threadId", "v"]) ||
+			value.v !== 2 ||
+			!hasExactKeys(value, [
+				"generation",
+				"leafId",
+				"order",
+				"snapshotRevision",
+				"threadId",
+				"turnCount",
+				"turnOffset",
+				"v",
+			]) ||
 			!nonNegativeInteger(value.generation) ||
 			(value.leafId !== null && typeof value.leafId !== "string") ||
-			!nonNegativeInteger(value.messageCount) ||
-			!nonNegativeInteger(value.offset) ||
+			value.order !== "desc" ||
+			typeof value.snapshotRevision !== "string" ||
+			!/^[a-f0-9]{64}$/u.test(value.snapshotRevision) ||
 			typeof value.threadId !== "string" ||
-			value.v !== 1
+			!nonNegativeInteger(value.turnCount) ||
+			!nonNegativeInteger(value.turnOffset)
 		) {
 			throw new Error("Invalid cursor payload");
 		}
 		return {
 			generation: value.generation,
 			leafId: value.leafId,
-			messageCount: value.messageCount,
-			offset: value.offset,
+			order: "desc",
+			snapshotRevision: value.snapshotRevision,
 			threadId: value.threadId,
-			v: 1,
+			turnCount: value.turnCount,
+			turnOffset: value.turnOffset,
+			v: 2,
 		};
 	} catch {
 		throw new EmpatraHostProtocolError("invalid_cursor", "Thread read cursor is invalid");
@@ -786,6 +874,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	#initialized?: InitializedRuntime;
 	readonly #interruptedTurns = new Set<string>();
 	readonly #operationCommandTails = new Map<string, Promise<void>>();
+	readonly #threadReadProjectionCache = new Map<string, TurnAlignedThreadReadProjection>();
 	readonly #threadCommandTails = new Map<string, Promise<void>>();
 	readonly #pendingPlanResolutions = new Map<string, PendingPlanResolution>();
 	#hostToolCatalog?: Readonly<{ revision: string; tools: readonly EmpatraHostToolDefinition[] }>;
@@ -1447,10 +1536,139 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		};
 	}
 
+	#readProjection(
+		threadId: string,
+		generation: number,
+		leafId: string | null,
+		branch: readonly SessionEntry[],
+		activeTurnId: string | null,
+	): TurnAlignedThreadReadProjection {
+		const snapshotRevision = createThreadSnapshotRevision(generation, leafId);
+		const cacheKey = `${threadId}\0${snapshotRevision}`;
+		const cached = this.#threadReadProjectionCache.get(cacheKey);
+		if (cached) {
+			// Map insertion order is the small LRU; touching the item keeps hot
+			// history resident while bounding total retained projection memory.
+			this.#threadReadProjectionCache.delete(cacheKey);
+			this.#threadReadProjectionCache.set(cacheKey, cached);
+			return cached;
+		}
+
+		const projection = buildTurnAlignedThreadReadProjection(branch, activeTurnId);
+		if (projection.bytes <= MAX_THREAD_READ_PROJECTION_CACHE_BYTES) {
+			this.#threadReadProjectionCache.set(cacheKey, projection);
+			while (this.#threadReadProjectionCache.size > MAX_THREAD_READ_PROJECTION_CACHE_ENTRIES) {
+				const oldest = this.#threadReadProjectionCache.keys().next().value;
+				if (oldest === undefined) break;
+				this.#threadReadProjectionCache.delete(oldest);
+			}
+		}
+		return projection;
+	}
+
+	async #readTurnAlignedThreadPage(
+		command: ThreadReadCommand,
+		session: SessionInfo,
+		manager: SessionManager,
+		cursor: TurnAlignedThreadReadCursor | undefined,
+	): Promise<unknown> {
+		const config = findThreadConfig(manager);
+		const branch = manager.getBranch();
+		const modelContextWindow = this.#requireModel(config.modelId).contextWindow;
+		if (modelContextWindow === null) {
+			throw new EmpatraHostProtocolError("model_invalid", "Injected model is missing its context window");
+		}
+		const generation = this.#registry.get(command.threadId)?.generation ?? 0;
+		const leafId = manager.getLeafId();
+		const snapshotRevision = createThreadSnapshotRevision(generation, leafId);
+		if (
+			cursor &&
+			(cursor.threadId !== command.threadId ||
+				cursor.generation !== generation ||
+				cursor.leafId !== leafId ||
+				cursor.snapshotRevision !== snapshotRevision)
+		) {
+			throw new EmpatraHostProtocolError("stale_cursor", "Thread changed during snapshot pagination");
+		}
+
+		const activeTurnId = this.#registry.get(command.threadId)?.activeTurnId ?? null;
+		const projection = this.#readProjection(command.threadId, generation, leafId, branch, activeTurnId);
+		const modelContext = projectEmpatraHostContextUsage(branch, modelContextWindow);
+		const thread = {
+			archived: (await this.#ensureThreadMetadata(session)).archived,
+			cwd: manager.getCwd(),
+			id: manager.getSessionId(),
+			modelId: config.modelId,
+			systemPromptSha256: digestEmpatraHostText(config.systemPrompt),
+			title: manager.getSessionName() ?? null,
+		};
+		const orderedTurns = projection.turns.toReversed();
+		const turnOffset = cursor?.turnOffset ?? 0;
+		if (
+			turnOffset > orderedTurns.length ||
+			(cursor?.turnCount !== undefined && cursor.turnCount !== orderedTurns.length)
+		) {
+			throw new EmpatraHostProtocolError("stale_cursor", "Thread turns changed during snapshot pagination");
+		}
+
+		const candidateTurns = orderedTurns.slice(turnOffset, turnOffset + command.limit);
+		const makePage = (pageTurns: readonly EmpatraHostTurnSummary[]) => {
+			const messages = pageTurns.flatMap(turn => projection.messagesByTurn.get(turn.id) ?? []);
+			const nextOffset = turnOffset + pageTurns.length;
+			return {
+				contextUsage: modelContext,
+				generation,
+				messages,
+				nextCursor:
+					nextOffset < orderedTurns.length
+						? encodeThreadReadCursor({
+								generation,
+								leafId,
+								order: "desc",
+								snapshotRevision,
+								threadId: command.threadId,
+								turnCount: orderedTurns.length,
+								turnOffset: nextOffset,
+								v: 2,
+							})
+						: null,
+				paginationVersion: 2 as const,
+				snapshotRevision,
+				thread,
+				turns: pageTurns,
+			};
+		};
+
+		let pageTurns = candidateTurns;
+		for (;;) {
+			const candidate = makePage(pageTurns.toReversed());
+			if (eventEncoder.encode(JSON.stringify(candidate)).byteLength <= EMPATRA_HOST_THREAD_READ_TARGET_BYTES) {
+				if (pageTurns.length === 0 && turnOffset < orderedTurns.length) {
+					throw new EmpatraHostProtocolError("frame_too_large", "A projected thread turn exceeds the read budget");
+				}
+				return candidate;
+			}
+			if (pageTurns.length <= 1) {
+				throw new EmpatraHostProtocolError("frame_too_large", "A projected thread turn exceeds the read budget");
+			}
+			pageTurns = pageTurns.slice(0, -1);
+		}
+	}
+
 	async readThread(command: ThreadReadCommand): Promise<unknown> {
 		return this.#withThreadCommand(command.threadId, async () => {
 			const session = await this.#findThread(command.threadId);
 			return this.#withThreadManager(command.threadId, async manager => {
+				const requestedCursor = command.cursor ? decodeThreadReadCursor(command.cursor) : undefined;
+				if (command.pagination === "turns-v2" || requestedCursor?.v === 2) {
+					if (requestedCursor?.v === 1) {
+						throw new EmpatraHostProtocolError(
+							"invalid_cursor",
+							"Legacy thread read cursors cannot be used with turn-aligned pagination",
+						);
+					}
+					return this.#readTurnAlignedThreadPage(command, session, manager, requestedCursor);
+				}
 				const config = findThreadConfig(manager);
 				const branch = manager.getBranch();
 				const messages = projectThreadMessages(branch);
@@ -1462,7 +1680,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				const generation = this.#registry.get(command.threadId)?.generation ?? 0;
 				const leafId = manager.getLeafId();
 				const snapshotRevision = createThreadSnapshotRevision(generation, leafId);
-				const cursor = command.cursor ? decodeThreadReadCursor(command.cursor) : undefined;
+				const cursor = requestedCursor?.v === 1 ? requestedCursor : undefined;
 				if (
 					cursor &&
 					(cursor.threadId !== command.threadId ||
@@ -1673,6 +1891,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 
 	async dispose(): Promise<void> {
 		this.#disposing = true;
+		this.#threadReadProjectionCache.clear();
 		this.#interactionBroker.dispose();
 		for (const pending of this.#pendingPlanResolutions.values()) {
 			pending.reject(new EmpatraHostProtocolError("host_disposed", "OMP host is shutting down"));
