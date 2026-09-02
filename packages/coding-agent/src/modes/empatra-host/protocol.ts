@@ -7,6 +7,12 @@ import type {
 	EmpatraHostUserInputResponse,
 } from "./interaction-broker";
 import {
+	type EmpatraHostExecutionBrokerRequestEvent,
+	type EmpatraHostExecutionBrokerResponseCommand,
+	parseEmpatraHostExecutionBrokerRequestEvent,
+	parseEmpatraHostExecutionBrokerResponse,
+} from "./execution-broker";
+import {
 	parseEmpatraHostImageGenerationRequestedEvent,
 	parseEmpatraHostImageGenerationResponseCommand,
 	parseEmpatraHostImageGenerationEvent,
@@ -15,11 +21,11 @@ import {
 	type EmpatraHostImageGenerationEvent,
 } from "./image-generation";
 import {
-	type EmpatraHostExecutionBrokerRequestEvent,
-	type EmpatraHostExecutionBrokerResponseCommand,
-	parseEmpatraHostExecutionBrokerRequestEvent,
-	parseEmpatraHostExecutionBrokerResponse,
-} from "./execution-broker";
+	parseEmpatraHostMcpOAuthRequestedEvent,
+	parseEmpatraHostMcpOAuthResponseCommand,
+	type EmpatraHostMcpOAuthRequestedEvent,
+	type EmpatraHostMcpOAuthResponseCommand,
+} from "./mcp-oauth-broker";
 import {
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	parseEmpatraHostSubagentCommand,
@@ -89,6 +95,8 @@ export const EMPATRA_HOST_FRAMING_CAPABILITY = "framing.chunked.v1" as const;
  * approval/sandbox gates are wired end to end.
  */
 export const EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY = "execution_broker.v1" as const;
+/** Main-owned MCP OAuth initiation; credentials never cross the host boundary. */
+export const EMPATRA_HOST_MCP_OAUTH_CAPABILITY = "mcp.oauth.main-owned-v1" as const;
 export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
@@ -102,12 +110,17 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
 ] as const;
 export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
-export type EmpatraHostAdvertisedCapability = EmpatraHostCapability | typeof EMPATRA_HOST_SUBAGENT_CAPABILITY | typeof EMPATRA_HOST_FRAMING_CAPABILITY;
+export type EmpatraHostAdvertisedCapability =
+	| EmpatraHostCapability
+	| typeof EMPATRA_HOST_SUBAGENT_CAPABILITY
+	| typeof EMPATRA_HOST_FRAMING_CAPABILITY
+	| typeof EMPATRA_HOST_MCP_OAUTH_CAPABILITY;
 const EMPATRA_HOST_CAPABILITY_SET = new Set<string>(EMPATRA_HOST_CAPABILITIES);
 const EMPATRA_HOST_ADVERTISED_CAPABILITY_SET = new Set<string>([
 	...EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	EMPATRA_HOST_FRAMING_CAPABILITY,
+	EMPATRA_HOST_MCP_OAUTH_CAPABILITY,
 ]);
 
 const textEncoder = new TextEncoder();
@@ -516,6 +529,7 @@ export type EmpatraHostCommand =
 	| EmpatraHostGoalGetCommand
 	| EmpatraHostGoalSetCommand
 	| EmpatraHostExecutionBrokerResponseCommand
+	| EmpatraHostMcpOAuthResponseCommand
 	| EmpatraHostInitializeCommand
 	| EmpatraHostImageGenerationResponseCommand
 	| EmpatraHostInteractionActivityCommand
@@ -707,6 +721,7 @@ export type EmpatraHostEvent =
 	| EmpatraHostImageGenerationRequestedEvent
 	| EmpatraHostImageGenerationEvent
 	| EmpatraHostExecutionBrokerRequestEvent
+	| EmpatraHostMcpOAuthRequestedEvent
 	| EmpatraHostInteractionRequestedEvent
 	| EmpatraHostPlanProposalEvent
 	| EmpatraHostToolExecutionEndEvent
@@ -856,7 +871,7 @@ function parseEmpatraHostAdvertisedCapability(value: unknown): EmpatraHostAdvert
  * unknown names and duplicate claims fail closed.
  */
 export function parseEmpatraHostCapabilities(value: unknown): readonly EmpatraHostAdvertisedCapability[] {
-	if (!Array.isArray(value) || value.length > EMPATRA_HOST_CAPABILITIES.length + 2) {
+	if (!Array.isArray(value) || value.length > EMPATRA_HOST_CAPABILITIES.length + 3) {
 		throw new EmpatraHostProtocolError("invalid_request", "host capabilities are invalid");
 	}
 	const capabilities = value.map(parseEmpatraHostAdvertisedCapability);
@@ -1398,6 +1413,8 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			};
 		case "execution_broker_response":
 			return parseEmpatraHostExecutionBrokerResponse(parsed);
+		case "mcp_oauth_response":
+			return parseEmpatraHostMcpOAuthResponseCommand(parsed);
 		case "host_shutdown":
 			if (!hasOnlyKeys(parsed, ["id", "type"])) {
 				throw new EmpatraHostProtocolError("invalid_request", `${parsed.type} contains unknown fields`);
@@ -1839,6 +1856,9 @@ export function serializeEmpatraHostFrame(
 	}
 	if (frame.type === "host_event" && frame.event === "execution_broker_request") {
 		parseEmpatraHostExecutionBrokerRequestEvent(frame);
+	}
+	if (frame.type === "host_event" && frame.event === "mcp_oauth_requested") {
+		parseEmpatraHostMcpOAuthRequestedEvent(frame);
 	}
 	if (frame.type === "host_event" && frame.event === "image_generation_requested") {
 		if (!parseEmpatraHostImageGenerationRequestedEvent(frame)) {

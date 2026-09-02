@@ -3,6 +3,7 @@ import { LineTooLongError, readLines } from "@oh-my-pi/pi-utils";
 import { EmpatraHostProtocolError } from "./errors";
 import {
 	EMPATRA_HOST_CAPABILITIES,
+	EMPATRA_HOST_MCP_OAUTH_CAPABILITY,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
 	EMPATRA_HOST_PROTOCOL_VERSION,
 	type EmpatraHostCommand,
@@ -41,6 +42,8 @@ export interface EmpatraHostRuntime {
 		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
 	): Promise<unknown>;
 	handleExecutionBrokerResponse(command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void;
+	/** Completes a main-owned MCP OAuth request; no credential material is accepted. */
+	handleMcpOAuthResponse?(command: Extract<EmpatraHostCommand, { type: "mcp_oauth_response" }>): void;
 	handleSubagentResponse?(command: Extract<EmpatraHostCommand, { type: "subagent_response" }>): void;
 	clearThreadGoal(command: Extract<EmpatraHostCommand, { type: "goal_clear" }>): Promise<unknown>;
 	compactThread(command: Extract<EmpatraHostCommand, { type: "thread_compact" }>): Promise<unknown>;
@@ -442,12 +445,28 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 				command.type === "host_tool_result" ||
 				command.type === "host_tool_cancel" ||
 				command.type === "execution_broker_response" ||
+				command.type === "mcp_oauth_response" ||
 				command.type === "subagent_response"
 			) {
 				try {
 					if (command.type === "host_tool_result") options.runtime.handleHostToolResult(command);
 					else if (command.type === "host_tool_cancel") options.runtime.handleHostToolCancel(command);
 					else if (command.type === "execution_broker_response") options.runtime.handleExecutionBrokerResponse(command);
+					else if (command.type === "mcp_oauth_response") {
+						if (!advertisedCapabilities.includes(EMPATRA_HOST_MCP_OAUTH_CAPABILITY)) {
+							throw new EmpatraHostProtocolError(
+								"mcp_oauth_unavailable",
+								"MCP OAuth capability was not negotiated by the main host",
+							);
+						}
+						if (!options.runtime.handleMcpOAuthResponse) {
+							throw new EmpatraHostProtocolError(
+								"mcp_oauth_unavailable",
+								"MCP OAuth response transport is not connected",
+							);
+						}
+						options.runtime.handleMcpOAuthResponse(command);
+					}
 					else if (!advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY)) {
 						throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent RPC was not negotiated by the main host");
 					} else if (!options.runtime.handleSubagentResponse) {
