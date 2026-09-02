@@ -120,7 +120,7 @@ describe("Empatra host execution broker seam", () => {
 			outputTruncated: false,
 		});
 		expect(calls).toHaveLength(1);
-		const bad = createEmpatraHostExecutionBroker(async request => ({
+		const bad = createEmpatraHostExecutionBroker(async _request => ({
 			operation: "process.exec",
 			output: "bad",
 			outputTruncated: false,
