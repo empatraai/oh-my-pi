@@ -90,6 +90,8 @@ import {
 	type EmpatraHostSubagentInterruptCommand,
 	type EmpatraHostSubagentListCommand,
 	type EmpatraHostSubagentRunner,
+	type EmpatraHostSubagentResponseCommand,
+	type EmpatraHostSubagentRpcTransport,
 	type EmpatraHostSubagentSpawnCommand,
 	type EmpatraHostSubagentSteerCommand,
 } from "./subagent-broker";
@@ -936,6 +938,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	readonly #registry: EmpatraHostThreadRegistry<ThreadHandle>;
 	readonly #sessionFactory: EmpatraHostSessionFactory;
 	readonly #subagentController?: EmpatraHostSubagentController;
+	readonly #subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
 	#disposing = false;
 	#eventSink: (event: EmpatraHostEvent) => Promise<void> = async () => {
 		throw new EmpatraHostProtocolError("event_sink_missing", "Empatra host event sink is not connected");
@@ -953,6 +956,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			maxResidentThreads?: number;
 			sessionFactory?: EmpatraHostSessionFactory;
 			subagentController?: EmpatraHostSubagentController;
+			subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
 			subagentRunner?: EmpatraHostSubagentRunner;
 		} = {},
 	) {
@@ -970,6 +974,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 						runner: subagentRunner,
 				})
 				: undefined);
+		this.#subagentRpcTransport = options.subagentRpcTransport;
 		this.#hostToolsConnection = new EmpatraHostToolsConnection();
 		this.#interactionBroker = new EmpatraHostInteractionBroker({
 			emitRequest: request => this.#emitInteractionRequest(request),
@@ -977,7 +982,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	}
 
 	getAdvertisedCapabilities() {
-		return this.#subagentController
+		return this.#subagentController || this.#subagentRpcTransport
 			? [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY]
 			: EMPATRA_HOST_CAPABILITIES;
 	}
@@ -1017,6 +1022,13 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			"execution_broker_unavailable",
 			"OMP execution broker transport is not connected",
 		);
+	}
+
+	handleSubagentResponse(command: EmpatraHostSubagentResponseCommand): void {
+		if (!this.#subagentRpcTransport) {
+			throw new EmpatraHostProtocolError("subagent_unavailable", "OMP subagent RPC transport is not connected");
+		}
+		this.#subagentRpcTransport.handleResponse(command);
 	}
 
 	async initialize(command: EmpatraHostInitializeCommand): Promise<unknown> {
@@ -2033,6 +2045,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	async dispose(): Promise<void> {
 		this.#disposing = true;
 		await this.#subagentController?.dispose();
+		this.#subagentRpcTransport?.dispose();
 		this.#threadReadProjectionCache.clear();
 		this.#interactionBroker.dispose();
 		for (const pending of this.#pendingPlanResolutions.values()) {

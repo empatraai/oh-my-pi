@@ -40,6 +40,7 @@ export interface EmpatraHostRuntime {
 		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
 	): Promise<unknown>;
 	handleExecutionBrokerResponse(command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void;
+	handleSubagentResponse?(command: Extract<EmpatraHostCommand, { type: "subagent_response" }>): void;
 	clearThreadGoal(command: Extract<EmpatraHostCommand, { type: "goal_clear" }>): Promise<unknown>;
 	compactThread(command: Extract<EmpatraHostCommand, { type: "thread_compact" }>): Promise<unknown>;
 	deleteThread(command: Extract<EmpatraHostCommand, { type: "thread_delete" }>): Promise<unknown>;
@@ -275,7 +276,7 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 		for (const pending of barrier.pending) pending.reject(error);
 	};
 	const dispatch = (
-		command: Exclude<EmpatraHostCommand, EmpatraHostInitializeCommand | { type: "host_shutdown" }>,
+		command: Exclude<EmpatraHostCommand, EmpatraHostInitializeCommand | { type: "host_shutdown" } | { type: "subagent_response" }>,
 	) => {
 		switch (command.type) {
 			case "image_generation_response":
@@ -426,12 +427,18 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 			if (
 				command.type === "host_tool_result" ||
 				command.type === "host_tool_cancel" ||
-				command.type === "execution_broker_response"
+				command.type === "execution_broker_response" ||
+				command.type === "subagent_response"
 			) {
 				try {
 					if (command.type === "host_tool_result") options.runtime.handleHostToolResult(command);
 					else if (command.type === "host_tool_cancel") options.runtime.handleHostToolCancel(command);
-					else options.runtime.handleExecutionBrokerResponse(command);
+					else if (command.type === "execution_broker_response") options.runtime.handleExecutionBrokerResponse(command);
+					else if (!advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY)) {
+						throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent RPC was not negotiated by the main host");
+					} else if (!options.runtime.handleSubagentResponse) {
+						throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent RPC transport is not connected");
+					} else options.runtime.handleSubagentResponse(command);
 				} catch (error) {
 					await writeError(command.type === "execution_broker_response" ? null : command.id, error);
 				}

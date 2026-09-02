@@ -102,6 +102,41 @@ export interface EmpatraHostSubagentResponse {
 	type: "subagent_response";
 }
 
+/** Sidecar-to-main request; authority-bearing process fields are excluded. */
+export interface EmpatraHostSubagentRequestBase {
+	event: "subagent_request";
+	generation: number;
+	requestId: string;
+	sequence: number;
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+}
+export interface EmpatraHostSubagentSpawnRequestEvent extends EmpatraHostSubagentRequestBase {
+	agentName?: string;
+	assignment: string;
+	modelId?: string;
+	operation: "spawn";
+}
+export interface EmpatraHostSubagentSteerRequestEvent extends EmpatraHostSubagentRequestBase {
+	childId: string;
+	message: string;
+	operation: "steer";
+}
+export interface EmpatraHostSubagentChildRequestEvent extends EmpatraHostSubagentRequestBase {
+	childId: string;
+	operation: "interrupt" | "close";
+}
+export interface EmpatraHostSubagentListRequestEvent extends EmpatraHostSubagentRequestBase {
+	operation: "list";
+}
+export type EmpatraHostSubagentRequestEvent =
+	| EmpatraHostSubagentChildRequestEvent
+	| EmpatraHostSubagentListRequestEvent
+	| EmpatraHostSubagentSpawnRequestEvent
+	| EmpatraHostSubagentSteerRequestEvent;
+export type EmpatraHostSubagentResponseCommand = EmpatraHostSubagentResponse;
+
 export interface EmpatraHostSubagentLifecycleEvent {
 	agentName: string;
 	childId: string;
@@ -193,6 +228,19 @@ function eventScope(value: Record<string, unknown>): Pick<EmpatraHostSubagentLif
 		generation: boundedInteger(value.generation, "generation", 1, Number.MAX_SAFE_INTEGER),
 		threadId: boundedString(value.threadId, "threadId", 256),
 		turnId: boundedString(value.turnId, "turnId", 256),
+	};
+}
+
+function requestBase(value: Record<string, unknown>): EmpatraHostSubagentRequestBase {
+	if (value.event !== "subagent_request" || value.type !== "host_event") {
+		throw new EmpatraHostProtocolError("subagent_request_invalid", "subagent request is invalid");
+	}
+	return {
+		...eventScope(value),
+		event: "subagent_request",
+		requestId: identifier(value.requestId, "requestId"),
+		sequence: boundedInteger(value.sequence, "sequence", 1, Number.MAX_SAFE_INTEGER),
+		type: "host_event",
 	};
 }
 
@@ -375,6 +423,45 @@ export function parseEmpatraHostSubagentResponse(value: unknown): EmpatraHostSub
 		success: false,
 		type: "subagent_response",
 	};
+}
+
+/** Parse the closed sidecar-to-main request family. */
+export function parseEmpatraHostSubagentRequestEvent(value: unknown): EmpatraHostSubagentRequestEvent {
+	if (!isRecord(value) || value.type !== "host_event" || value.event !== "subagent_request") {
+		throw new EmpatraHostProtocolError("subagent_request_invalid", "subagent request is invalid");
+	}
+	const base = requestBase(value);
+	switch (value.operation) {
+		case "spawn":
+			if (!hasOnlyKeys(value, ["agentName", "assignment", "event", "generation", "modelId", "operation", "requestId", "sequence", "threadId", "turnId", "type"])) {
+				throw new EmpatraHostProtocolError("subagent_request_invalid", "subagent spawn request contains unknown fields");
+			}
+			return {
+				...base,
+				...(optionalAgentName(value.agentName) === undefined ? {} : { agentName: optionalAgentName(value.agentName) }),
+				assignment: boundedString(value.assignment, "assignment", EMPATRA_HOST_MAX_SUBAGENT_ASSIGNMENT_BYTES),
+				...(optionalModelId(value.modelId) === undefined ? {} : { modelId: optionalModelId(value.modelId) }),
+				operation: "spawn",
+			};
+		case "steer":
+			if (!hasOnlyKeys(value, ["childId", "event", "generation", "message", "operation", "requestId", "sequence", "threadId", "turnId", "type"])) {
+				throw new EmpatraHostProtocolError("subagent_request_invalid", "subagent steer request contains unknown fields");
+			}
+			return { ...base, childId: identifier(value.childId, "childId"), message: boundedString(value.message, "message", EMPATRA_HOST_MAX_SUBAGENT_MESSAGE_BYTES), operation: "steer" };
+		case "interrupt":
+		case "close":
+			if (!hasOnlyKeys(value, ["childId", "event", "generation", "operation", "requestId", "sequence", "threadId", "turnId", "type"])) {
+				throw new EmpatraHostProtocolError("subagent_request_invalid", "subagent child request contains unknown fields");
+			}
+			return { ...base, childId: identifier(value.childId, "childId"), operation: value.operation };
+		case "list":
+			if (!hasOnlyKeys(value, ["event", "generation", "operation", "requestId", "sequence", "threadId", "turnId", "type"])) {
+				throw new EmpatraHostProtocolError("subagent_request_invalid", "subagent list request contains unknown fields");
+			}
+			return { ...base, operation: "list" };
+		default:
+			throw new EmpatraHostProtocolError("subagent_unknown_request", "Unknown subagent request operation");
+	}
 }
 
 /** Parse a projected lifecycle/progress/result event without exposing a transcript path. */
@@ -838,6 +925,91 @@ export function createFailClosedEmpatraHostSubagentBroker(): EmpatraHostSubagent
 		list: unavailable,
 		spawn: unavailable,
 		steer: unavailable,
+	};
+}
+
+export type EmpatraHostSubagentRequestEventEmitter = (event: EmpatraHostSubagentRequestEvent) => Promise<void>;
+
+/** Sidecar transport for requests answered by Electron main. */
+export interface EmpatraHostSubagentRpcTransport {
+	readonly broker: EmpatraHostSubagentBroker;
+	handleResponse(response: EmpatraHostSubagentResponseCommand): void;
+	dispose(): void;
+}
+
+export function createEmpatraHostSubagentRpcTransport(options: Readonly<{
+	capabilities?: readonly string[];
+	emitEvent: EmpatraHostSubagentRequestEventEmitter;
+	maxInflight?: number;
+	nextSequence?: (scope: Pick<EmpatraHostSubagentRequestBase, "generation" | "threadId" | "turnId">) => number;
+}>): EmpatraHostSubagentRpcTransport {
+	assertEmpatraHostSubagentCapability(options.capabilities ?? []);
+	const maxInflight = options.maxInflight ?? EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN;
+	if (!Number.isSafeInteger(maxInflight) || maxInflight < 1 || maxInflight > EMPATRA_HOST_MAX_SUBAGENT_SNAPSHOTS) {
+		throw new RangeError("maxInflight must be between 1 and 256");
+	}
+	const pending = new Map<string, { reject: (error: unknown) => void; resolve: (result: EmpatraHostSubagentCommandResult | undefined) => void }>();
+	let disposed = false;
+	let sequence = 0;
+	const issue = async (event: EmpatraHostSubagentRequestEvent) => {
+		if (disposed) throw new EmpatraHostProtocolError("subagent_disposed", "OMP subagent RPC transport is disposed");
+		if (pending.size >= maxInflight) throw new EmpatraHostProtocolError("subagent_capacity_exceeded", "OMP subagent request capacity is exhausted");
+		const { promise, resolve, reject } = Promise.withResolvers<EmpatraHostSubagentCommandResult | undefined>();
+		pending.set(event.requestId, { reject, resolve });
+		try {
+			await options.emitEvent(event);
+		} catch (error) {
+			pending.delete(event.requestId);
+			reject(error);
+		}
+		return promise;
+	};
+	const base = (scope: EmpatraHostSubagentScope) => {
+		const requestScope = {
+			generation: boundedInteger(scope.generation, "generation", 1, Number.MAX_SAFE_INTEGER),
+			threadId: identifier(scope.parentThreadId, "threadId"),
+			turnId: identifier(scope.parentTurnId, "turnId"),
+		};
+		const next = options.nextSequence?.(requestScope) ?? ++sequence;
+		if (!Number.isSafeInteger(next) || next < 1) throw new EmpatraHostProtocolError("subagent_request_invalid", "sequence is invalid");
+		return { ...requestScope, event: "subagent_request" as const, requestId: randomUUID(), sequence: next, type: "host_event" as const };
+	};
+	const broker: EmpatraHostSubagentBroker = {
+		capability: EMPATRA_HOST_SUBAGENT_CAPABILITY,
+		close: async (scope, childId) => { await issue({ ...base(scope), childId: identifier(childId, "childId"), operation: "close" }); },
+		interrupt: async (scope, childId) => { await issue({ ...base(scope), childId: identifier(childId, "childId"), operation: "interrupt" }); },
+		list: async scope => {
+			const result = await issue({ ...base(scope), operation: "list" });
+			if (!result || !("subagents" in result)) throw new EmpatraHostProtocolError("subagent_response_invalid", "OMP returned an invalid subagent list");
+			return result;
+		},
+		spawn: async (scope, request) => {
+			const result = await issue({ ...base(scope), ...(request.agentName === undefined ? {} : { agentName: agentName(request.agentName) }), assignment: boundedString(request.assignment, "assignment", EMPATRA_HOST_MAX_SUBAGENT_ASSIGNMENT_BYTES), ...(request.modelId === undefined ? {} : { modelId: optionalModelId(request.modelId) }), operation: "spawn" });
+			if (!result || !("childId" in result)) throw new EmpatraHostProtocolError("subagent_response_invalid", "OMP returned an invalid subagent spawn result");
+			return result;
+		},
+		steer: async (scope, childId, message) => { await issue({ ...base(scope), childId: identifier(childId, "childId"), message: boundedString(message, "message", EMPATRA_HOST_MAX_SUBAGENT_MESSAGE_BYTES), operation: "steer" }); },
+	};
+	return {
+		broker,
+		handleResponse: response => {
+			if (disposed) return;
+			const parsed = parseEmpatraHostSubagentResponse(response);
+			const current = pending.get(parsed.id);
+			if (!current) return;
+			pending.delete(parsed.id);
+			if (!parsed.success) {
+				current.reject(new EmpatraHostProtocolError(parsed.error?.code ?? "subagent_failed", parsed.error?.message ?? "OMP subagent request failed"));
+				return;
+			}
+			current.resolve(parsed.data);
+		},
+		dispose: () => {
+			disposed = true;
+			const error = new EmpatraHostProtocolError("subagent_disposed", "OMP subagent RPC transport is disposed");
+			for (const entry of pending.values()) entry.reject(error);
+			pending.clear();
+		},
 	};
 }
 

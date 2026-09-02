@@ -24,8 +24,12 @@ import {
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	parseEmpatraHostSubagentCommand,
 	parseEmpatraHostSubagentEvent,
+	parseEmpatraHostSubagentRequestEvent,
+	parseEmpatraHostSubagentResponse,
 	type EmpatraHostSubagentCommand,
 	type EmpatraHostSubagentEvent,
+	type EmpatraHostSubagentRequestEvent,
+	type EmpatraHostSubagentResponseCommand,
 } from "./subagent-broker";
 
 export const EMPATRA_HOST_PROTOCOL_VERSION = 6 as const;
@@ -532,7 +536,8 @@ export type EmpatraHostCommand =
 	| EmpatraHostTurnInterruptCommand
 	| EmpatraHostTurnSteerCommand
 	| EmpatraHostTurnStartCommand
-	| EmpatraHostSubagentCommand;
+	| EmpatraHostSubagentCommand
+	| EmpatraHostSubagentResponseCommand;
 
 export interface EmpatraHostReadyFrame {
 	capabilities: readonly EmpatraHostAdvertisedCapability[];
@@ -704,7 +709,8 @@ export type EmpatraHostEvent =
 	| EmpatraHostTurnCompletedEvent
 	| EmpatraHostTurnOutputEvent
 	| EmpatraHostTurnUsageUpdatedEvent
-	| EmpatraHostSubagentEvent;
+	| EmpatraHostSubagentEvent
+	| EmpatraHostSubagentRequestEvent;
 
 export interface EmpatraHostSuccessResponse {
 	data?: unknown;
@@ -1299,6 +1305,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 		throw new EmpatraHostProtocolError("invalid_request", "Host command must be an object with a type");
 	}
 	if (parsed.type === "host_initialize") return parseInitialize(parsed);
+	if (parsed.type === "subagent_response") return parseEmpatraHostSubagentResponse(parsed);
 	if (parsed.type.startsWith("subagent_")) return parseEmpatraHostSubagentCommand(parsed);
 	const id = identifier(parsed.id, "id");
 
@@ -1792,7 +1799,12 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 }
 
 export function serializeEmpatraHostFrame(
-	frame: EmpatraHostEvent | EmpatraHostReadyFrame | EmpatraHostResponse | EmpatraHostToolOutboundFrame,
+	frame:
+		| EmpatraHostEvent
+		| EmpatraHostReadyFrame
+		| EmpatraHostResponse
+		| EmpatraHostToolOutboundFrame
+		| EmpatraHostSubagentResponseCommand,
 ): string {
 	if (frame.type === "host_ready") {
 		if (
@@ -1820,6 +1832,10 @@ export function serializeEmpatraHostFrame(
 	) {
 		parseEmpatraHostSubagentEvent(frame);
 	}
+	if (frame.type === "host_event" && frame.event === "subagent_request") {
+		parseEmpatraHostSubagentRequestEvent(frame);
+	}
+	if (frame.type === "subagent_response") parseEmpatraHostSubagentResponse(frame);
 	if (frame.type === "host_event" && frame.event === "plan_proposal") {
 		interactionDigest(frame.digest);
 		boundedInteger(frame.generation, "generation", 1, Number.MAX_SAFE_INTEGER);

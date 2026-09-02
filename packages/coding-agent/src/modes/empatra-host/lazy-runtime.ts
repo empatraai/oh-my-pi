@@ -10,6 +10,8 @@ import type {
 	EmpatraHostSubagentInterruptCommand,
 	EmpatraHostSubagentListCommand,
 	EmpatraHostSubagentRunner,
+	EmpatraHostSubagentResponseCommand,
+	EmpatraHostSubagentRpcTransport,
 	EmpatraHostSubagentSpawnCommand,
 	EmpatraHostSubagentSteerCommand,
 } from "./subagent-broker";
@@ -21,6 +23,7 @@ export interface EmpatraHostRuntimeFactoryOptions {
 	 * embedders; the CLI never reconstructs a runner from argv or environment.
 	 */
 	readonly subagentRunner?: EmpatraHostSubagentRunner;
+	readonly subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
 }
 
 type RuntimeFactory = (options: EmpatraHostRuntimeFactoryOptions) => Promise<EmpatraHostRuntime>;
@@ -71,6 +74,12 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 		const runtime = this.#requireRuntime();
 		if (!runtime.interruptSubagent) return Promise.reject(new Error("Subagent lifecycle is unavailable"));
 		return runtime.interruptSubagent(command);
+	}
+
+	handleSubagentResponse(command: EmpatraHostSubagentResponseCommand): void {
+		const runtime = this.#requireRuntime();
+		if (!runtime.handleSubagentResponse) throw new Error("Subagent RPC transport is unavailable");
+		runtime.handleSubagentResponse(command);
 	}
 
 	closeSubagent(command: EmpatraHostSubagentCloseCommand): Promise<unknown> {
