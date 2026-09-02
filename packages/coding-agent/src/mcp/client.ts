@@ -8,7 +8,7 @@ import * as url from "node:url";
 import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
-import { createSseTransport } from "./transports/sse";
+import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
 import { createStdioTransport } from "./transports/stdio";
 import type {
 	MCPGetPromptParams,
@@ -236,7 +236,7 @@ export async function connectToServer(
 		if (transport) {
 			void transport.close().catch(() => {});
 		}
-		throw error;
+		throw error instanceof LegacySseConnectionTimeoutError ? timeoutError : error;
 	}
 }
 

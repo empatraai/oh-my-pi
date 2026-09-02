@@ -118,6 +118,41 @@ describe("MCPManager initial connection ownership", () => {
 		}
 	}, 5_000);
 
+	it("stops a startup-timeout retry when that server is disconnected", async () => {
+		vi.useFakeTimers();
+		const manager = new MCPManager(process.cwd());
+		const retryStarted = Promise.withResolvers<void>();
+		const retryGate = Promise.withResolvers<MCPServerConnection>();
+		let connectCalls = 0;
+		vi.spyOn(mcpClient, "connectToServer").mockImplementation(() => {
+			connectCalls += 1;
+			if (connectCalls === 1) {
+				return Promise.reject(new mcpClient.MCPConnectionTimeoutError("server", 100));
+			}
+			if (connectCalls === 2) {
+				retryStarted.resolve();
+				return retryGate.promise;
+			}
+			return Promise.reject(new Error("unexpected reconnect"));
+		});
+
+		try {
+			await manager.connectServers({ server: CONFIG }, {});
+			await retryStarted.promise;
+			await manager.disconnectServer("server");
+			retryGate.reject(new Error("retry failed after disconnect"));
+			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+			vi.advanceTimersByTime(10_000);
+			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+
+			expect(connectCalls).toBe(2);
+			expect(manager.getConnectionStatus("server")).toBe("disconnected");
+		} finally {
+			vi.useRealTimers();
+			await manager.disconnectAll();
+		}
+	});
+
 	it("does not close a newer connection while cleaning up a stale result", async () => {
 		const manager = new MCPManager(process.cwd());
 		const firstDeferred = Promise.withResolvers<MCPServerConnection>();
