@@ -15,6 +15,7 @@ import {
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
 	EMPATRA_HOST_PROTOCOL_VERSION,
 	EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
+	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY,
 	EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
 	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
@@ -87,6 +88,28 @@ describe("Empatra host protocol", () => {
 		const command = parseEmpatraHostCommand(JSON.stringify(validInitialize));
 
 		expect(command).toEqual(validInitialize);
+	});
+
+	test("accepts only the versioned explicit subagent RPC bootstrap", () => {
+		const command = parseEmpatraHostCommand(
+			JSON.stringify({
+				...validInitialize,
+				subagentRpc: { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY },
+			}),
+		);
+		expect(command).toMatchObject({
+			subagentRpc: { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY },
+		});
+		expect(() =>
+			parseEmpatraHostCommand(
+				JSON.stringify({ ...validInitialize, subagentRpc: { capability: "subagents.lifecycle.v2" } }),
+			),
+		).toThrow("subagentRpc bootstrap is invalid");
+		expect(() =>
+			parseEmpatraHostCommand(
+				JSON.stringify({ ...validInitialize, subagentRpc: { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY, extra: true } }),
+			),
+		).toThrow("subagentRpc bootstrap is invalid");
 	});
 
 	test("accepts only hash-bound explicit extension descriptors", () => {

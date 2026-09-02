@@ -11,6 +11,9 @@ import { EmpatraHostProtocolError } from "./errors";
  * controller wires an executor, persistence, and approval policy end to end.
  */
 export const EMPATRA_HOST_SUBAGENT_CAPABILITY = "subagents.lifecycle.v1" as const;
+/** Launch-time opt-in accepted only from the sanitized Electron environment. */
+export const EMPATRA_HOST_SUBAGENT_RPC_OPT_IN_ENV = "EMPATRA_OMP_SUBAGENT_RPC" as const;
+export const EMPATRA_HOST_SUBAGENT_RPC_OPT_IN_VALUE = "v1" as const;
 
 export const EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN = 16;
 export const EMPATRA_HOST_MAX_SUBAGENT_ASSIGNMENT_BYTES = 64 * 1024;
@@ -100,6 +103,15 @@ export interface EmpatraHostSubagentResponse {
 	id: string;
 	success: boolean;
 	type: "subagent_response";
+}
+
+/**
+ * Explicit bootstrap request from the Electron main process. The sidecar
+ * never enables subagent RPC merely because the implementation is present;
+ * both the launch-time opt-in and this typed initialize field are required.
+ */
+export interface EmpatraHostSubagentRpcBootstrap {
+	capability: typeof EMPATRA_HOST_SUBAGENT_CAPABILITY;
 }
 
 /** Sidecar-to-main request; authority-bearing process fields are excluded. */

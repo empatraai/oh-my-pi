@@ -29,6 +29,7 @@ import {
 	type EmpatraHostSubagentCommand,
 	type EmpatraHostSubagentEvent,
 	type EmpatraHostSubagentRequestEvent,
+	type EmpatraHostSubagentRpcBootstrap,
 	type EmpatraHostSubagentResponseCommand,
 } from "./subagent-broker";
 
@@ -207,6 +208,7 @@ export interface EmpatraHostInitializeCommand {
 	skills?: EmpatraHostSkill[];
 	protocolVersion: typeof EMPATRA_HOST_PROTOCOL_VERSION;
 	sessionDirectory: string;
+	subagentRpc?: EmpatraHostSubagentRpcBootstrap;
 	type: "host_initialize";
 	workspaceRoots: string[];
 }
@@ -783,6 +785,7 @@ const SAFE_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
 	rollback_unavailable: "OMP cannot roll back the requested number of turns",
 	runtime_error: "OMP host operation failed",
 	server_busy: "OMP host command queue is full",
+	subagent_unavailable: "OMP subagent lifecycle was not negotiated by the main host",
 	stale_generation: "The command targets a stale thread generation",
 	stale_cursor: "OMP host pagination cursor is stale",
 	stale_turn: "The command does not match the active turn",
@@ -1249,6 +1252,7 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 			"skills",
 			"protocolVersion",
 			"sessionDirectory",
+			"subagentRpc",
 			"type",
 			"workspaceRoots",
 		]) ||
@@ -1277,6 +1281,17 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 	if (new Set(skills.map(entry => entry.name)).size !== skills.length) {
 		throw new EmpatraHostProtocolError("invalid_request", "skill names must be unique");
 	}
+	let subagentRpc: EmpatraHostSubagentRpcBootstrap | undefined;
+	if (value.subagentRpc !== undefined) {
+		if (
+			!isRecord(value.subagentRpc) ||
+			!hasOnlyKeys(value.subagentRpc, ["capability"]) ||
+			value.subagentRpc.capability !== EMPATRA_HOST_SUBAGENT_CAPABILITY
+		) {
+			throw new EmpatraHostProtocolError("invalid_request", "subagentRpc bootstrap is invalid");
+		}
+		subagentRpc = { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY };
+	}
 	return {
 		capability: boundedString(value.capability, "capability", 32, 512),
 		...(value.extensions === undefined ? {} : { extensions: value.extensions.map(extensionDescriptor) }),
@@ -1285,6 +1300,7 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 		models,
 		protocolVersion: EMPATRA_HOST_PROTOCOL_VERSION,
 		sessionDirectory: absolutePath(value.sessionDirectory, "sessionDirectory"),
+		...(subagentRpc === undefined ? {} : { subagentRpc }),
 		skills,
 		type: "host_initialize",
 		workspaceRoots,

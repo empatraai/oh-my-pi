@@ -165,7 +165,10 @@ describe("Empatra host protocol server", () => {
 		});
 		await runEmpatraHostServer({
 			input: inputStream([
-				initializeCommand(),
+				{
+					...initializeCommand(),
+					subagentRpc: { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY },
+				},
 				{
 					assignment: "Проверь OMP task",
 					generation: 1,

@@ -409,6 +409,16 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 					continue;
 				}
 				try {
+					const subagentCapabilityAdvertised = advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY);
+					const subagentCapabilityRequested = command.subagentRpc?.capability === EMPATRA_HOST_SUBAGENT_CAPABILITY;
+					if (subagentCapabilityAdvertised !== subagentCapabilityRequested) {
+						throw new EmpatraHostProtocolError(
+							"subagent_unavailable",
+							subagentCapabilityAdvertised
+								? "Subagent RPC requires an explicit host_initialize bootstrap"
+								: "Subagent RPC bootstrap was requested but the host did not negotiate it",
+						);
+					}
 					const data = await options.runtime.initialize(command);
 					initialized = true;
 					await writeSuccess(command.id, data);
