@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { TOOL_NAME as DELAYED_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
 const CONFIG: MCPStdioServerConfig = {
 	type: "stdio",
@@ -84,6 +89,34 @@ describe("MCPManager initial connection ownership", () => {
 		expect(failed.transport.closeCalls).toBe(1);
 		expect(manager.getConnectedServers()).toEqual([]);
 	});
+
+	it("recovers tools after an initial handshake timeout", async () => {
+		const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-initial-recovery-"));
+		const manager = new MCPManager(workDir);
+		const rebound = Promise.withResolvers<void>();
+		const marker = path.join(workDir, "first-start");
+		const config: MCPStdioServerConfig = {
+			type: "stdio",
+			command: process.execPath,
+			args: [path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts"), marker],
+			timeout: 100,
+		};
+		manager.setOnToolsChanged(tools => {
+			if (tools.some(tool => tool.name === `mcp__server_${DELAYED_TOOL_NAME}`)) rebound.resolve();
+		});
+
+		try {
+			const result = await manager.connectServers({ server: config }, {});
+			expect(result.errors.get("server")).toBe('Connection to MCP server "server" timed out after 100ms');
+			await rebound.promise;
+
+			expect(manager.getConnectionStatus("server")).toBe("connected");
+			expect(manager.getTools().map(tool => tool.name)).toEqual([`mcp__server_${DELAYED_TOOL_NAME}`]);
+		} finally {
+			await manager.disconnectAll();
+			removeSyncWithRetries(workDir);
+		}
+	}, 5_000);
 
 	it("does not close a newer connection while cleaning up a stale result", async () => {
 		const manager = new MCPManager(process.cwd());

@@ -32,6 +32,7 @@
 ### Fixed
 
 - Fixed a native crash (and multi-gigabyte committed-memory growth held until exit) when git status ran over worktrees with tens of thousands of untracked files: whole-worktree porcelain status now runs through the git CLI with bounded output capture, falling back to the in-process gitoxide walk only when git is not installed, and any panic escaping a native VCS operation now surfaces as a structured `VcsError` instead of a process-level failure.
+- MCP servers now retry after transient startup handshake timeouts instead of remaining disconnected for the session ([#10478](https://github.com/can1357/oh-my-pi/issues/10478)).
 
 ## [18.1.0] - 2026-09-01
 

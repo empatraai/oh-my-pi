@@ -13,6 +13,7 @@ import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import {
+	MCPConnectionTimeoutError,
 	connectToServer,
 	disconnectServer,
 	getPrompt,
@@ -666,8 +667,13 @@ export class MCPManager {
 					this.#pendingToolLoads.delete(name);
 					const message = error instanceof Error ? error.message : String(error);
 					notify(createMcpStartupFailure(name, message, sources[name]));
-					if (!allowBackgroundLogging || reportedErrors.has(name)) return;
-					logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
+					if (allowBackgroundLogging && !reportedErrors.has(name)) {
+						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
+					}
+					if (error instanceof MCPConnectionTimeoutError) {
+						notify({ type: "connecting", serverNames: [name] });
+						void this.reconnectServer(name);
+					}
 				});
 		}
 
