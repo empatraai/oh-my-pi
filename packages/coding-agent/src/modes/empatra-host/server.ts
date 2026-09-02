@@ -15,6 +15,9 @@ import {
 
 export interface EmpatraHostRuntime {
 	archiveThread(command: Extract<EmpatraHostCommand, { type: "thread_archive" }>): Promise<unknown>;
+	getAtomicOperationStatus(
+		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
+	): Promise<unknown>;
 	clearThreadGoal(command: Extract<EmpatraHostCommand, { type: "goal_clear" }>): Promise<unknown>;
 	compactThread(command: Extract<EmpatraHostCommand, { type: "thread_compact" }>): Promise<unknown>;
 	deleteThread(command: Extract<EmpatraHostCommand, { type: "thread_delete" }>): Promise<unknown>;
@@ -278,6 +281,8 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 				return options.runtime.readThread(command);
 			case "thread_turns":
 				return options.runtime.listThreadTurns(command);
+			case "atomic_operation_status":
+				return options.runtime.getAtomicOperationStatus(command);
 			case "goal_get":
 				return options.runtime.getThreadGoal(command);
 			case "goal_set":

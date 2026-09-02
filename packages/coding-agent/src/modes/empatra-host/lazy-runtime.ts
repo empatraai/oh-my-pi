@@ -48,6 +48,12 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 		return this.#requireRuntime().archiveThread(command);
 	}
 
+	getAtomicOperationStatus(
+		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
+	): Promise<unknown> {
+		return this.#requireRuntime().getAtomicOperationStatus(command);
+	}
+
 	cancelInteraction(command: Extract<EmpatraHostCommand, { type: "interaction_cancel" }>): Promise<unknown> {
 		return this.#requireRuntime().cancelInteraction(command);
 	}

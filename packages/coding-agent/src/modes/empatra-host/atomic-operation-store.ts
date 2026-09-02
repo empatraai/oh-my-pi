@@ -135,6 +135,15 @@ WHERE operation_id = ?
 		return row ? projectRow(row) : undefined;
 	}
 
+	/**
+	 * Read-only receipt lookup used by the host reconciliation command. Keep
+	 * this separate from `accept`/`mark*` so status queries cannot accidentally
+	 * advance an operation or make replay decisions.
+	 */
+	status(operationId: string): EmpatraHostAtomicOperation | undefined {
+		return this.get(operationId);
+	}
+
 	markCompleted(operationId: string, inputSha256: string): void {
 		this.#advance(operationId, inputSha256, "completed");
 	}

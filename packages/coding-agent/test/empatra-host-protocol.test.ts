@@ -311,6 +311,25 @@ describe("Empatra host protocol", () => {
 		expect(
 			parseEmpatraHostCommand(
 				JSON.stringify({
+					id: "atomic-status-1",
+					operationId: "operation-atomic-1",
+					type: "atomic_operation_status",
+				}),
+			),
+		).toEqual({ id: "atomic-status-1", operationId: "operation-atomic-1", type: "atomic_operation_status" });
+		expect(() =>
+			parseEmpatraHostCommand(
+				JSON.stringify({
+					id: "atomic-status-secret",
+					operationId: "operation-1",
+					message: "secret",
+					type: "atomic_operation_status",
+				}),
+			),
+		).toThrow("unknown fields");
+		expect(
+			parseEmpatraHostCommand(
+				JSON.stringify({
 					cwd: "/tmp/workspace",
 					id: "atomic-create-1",
 					message: "Первая строка\nВторая строка",

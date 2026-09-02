@@ -111,6 +111,27 @@ describe("Empatra host atomic create/fork and start", () => {
 		expect(await completed.promise).toMatchObject({ outcome: "completed", turnId: command.turnId });
 		expect(await runtime.startThreadAndTurn({ ...command, id: "atomic-create-repeat" })).toEqual(first);
 		expect(sessions[0]?.prompts).toEqual([command.message]);
+		expect(
+			await runtime.getAtomicOperationStatus({
+				id: "atomic-status-1",
+				operationId: command.operationId,
+				type: "atomic_operation_status",
+			}),
+		).toMatchObject({
+			generation: 1,
+			kind: "create_and_start",
+			operationId: command.operationId,
+			status: "completed",
+			threadId: first.threadId,
+			turnId: command.turnId,
+		});
+		expect(
+			await runtime.getAtomicOperationStatus({
+				id: "atomic-status-missing",
+				operationId: "missing-operation",
+				type: "atomic_operation_status",
+			}),
+		).toEqual({ operationId: "missing-operation", status: "missing" });
 		await expect(
 			runtime.startThreadAndTurn({ ...command, id: "atomic-create-conflict", message: "Different input" }),
 		).rejects.toMatchObject({ code: "operation_conflict" });

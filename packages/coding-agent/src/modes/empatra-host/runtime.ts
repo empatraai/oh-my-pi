@@ -45,6 +45,7 @@ import {
 	prepareEmpatraHostImages,
 } from "./media-input";
 import type {
+	EmpatraHostAtomicOperationStatusResponse,
 	EmpatraHostCommand,
 	EmpatraHostEvent,
 	EmpatraHostGoalClearCommand,
@@ -854,6 +855,29 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			sessionDirectory,
 		};
 		return { modelCount: models.size, workspaceRootCount: policy.roots.length };
+	}
+
+	/**
+	 * Returns the durable receipt projection without opening a thread or
+	 * attempting recovery. A controller can use this after an uncertain request
+	 * to reconcile its state while preserving the no-replay boundary.
+	 */
+	async getAtomicOperationStatus(
+		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
+	): Promise<EmpatraHostAtomicOperationStatusResponse> {
+		return this.#withOperationCommand(command.operationId, async () => {
+			const receipt = this.#requireInitialized().atomicOperationStore.status(command.operationId);
+			if (!receipt) return { operationId: command.operationId, status: "missing" };
+			return {
+				generation: receipt.generation,
+				inputSha256: receipt.inputSha256,
+				kind: receipt.kind,
+				operationId: receipt.operationId,
+				status: receipt.phase,
+				threadId: receipt.threadId,
+				turnId: receipt.turnId,
+			};
+		});
 	}
 
 	setEventSink(sink: (event: EmpatraHostEvent) => Promise<void>): void {

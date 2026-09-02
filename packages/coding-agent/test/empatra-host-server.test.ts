@@ -60,6 +60,9 @@ function runtime(overrides: Partial<EmpatraHostRuntime> = {}): EmpatraHostRuntim
 			return { deleted: true };
 		},
 		async dispose() {},
+		async getAtomicOperationStatus() {
+			return { operationId: "operation-1", status: "missing" };
+		},
 		async initialize() {
 			return { initialized: true };
 		},
@@ -587,6 +590,37 @@ describe("Empatra host protocol server", () => {
 		for (const id of ["turns-1", "goal-get-1", "goal-set-1", "goal-clear-1"]) {
 			expect(responses.find(frame => frame.id === id)).toMatchObject({ success: true });
 		}
+	});
+
+	test("dispatches atomic operation status without replaying the operation", async () => {
+		const calls: string[] = [];
+		const output: string[] = [];
+		await runEmpatraHostServer({
+			input: inputStream([
+				initializeCommand(),
+				{ id: "atomic-status-1", operationId: "operation-1", type: "atomic_operation_status" },
+				{ id: "shutdown-atomic-status", type: "host_shutdown" },
+			]),
+			runtime: runtime({
+				async getAtomicOperationStatus() {
+					calls.push("status");
+					return { operationId: "operation-1", status: "dispatching" };
+				},
+				async startThreadAndTurn() {
+					calls.push("replay");
+					return { operationId: "operation-1", threadId: "thread-1", turnId: "turn-1" };
+				},
+			}),
+			write: async frame => {
+				output.push(frame);
+			},
+		});
+
+		expect(calls).toEqual(["status"]);
+		expect(output.map(frame => JSON.parse(frame)).find(frame => frame.id === "atomic-status-1")).toMatchObject({
+			data: { operationId: "operation-1", status: "dispatching" },
+			success: true,
+		});
 	});
 
 	test("does not serialize raw runtime error messages", async () => {

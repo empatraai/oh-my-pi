@@ -240,6 +240,17 @@ export interface EmpatraHostThreadTurnsCommand {
 	type: "thread_turns";
 }
 
+/**
+ * Read-only reconciliation query for a previously submitted atomic operation.
+ * This command is additive within protocol v6; it never resumes or replays the
+ * operation and carries no request payload beyond its opaque operation id.
+ */
+export interface EmpatraHostAtomicOperationStatusCommand {
+	id: string;
+	operationId: string;
+	type: "atomic_operation_status";
+}
+
 export type EmpatraHostGoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
 
 export interface EmpatraHostThreadGoal {
@@ -381,6 +392,7 @@ export interface EmpatraHostShutdownCommand {
 }
 
 export type EmpatraHostCommand =
+	| EmpatraHostAtomicOperationStatusCommand
 	| EmpatraHostGoalClearCommand
 	| EmpatraHostGoalGetCommand
 	| EmpatraHostGoalSetCommand
@@ -593,6 +605,19 @@ export interface EmpatraHostErrorResponse {
 }
 
 export type EmpatraHostResponse = EmpatraHostErrorResponse | EmpatraHostSuccessResponse;
+
+export type EmpatraHostAtomicOperationStatus = "accepted" | "completed" | "dispatching" | "missing";
+
+/** Secret-free receipt projection returned by `atomic_operation_status`. */
+export interface EmpatraHostAtomicOperationStatusResponse {
+	generation?: number;
+	inputSha256?: string;
+	kind?: "create_and_start" | "fork_and_start";
+	operationId: string;
+	status: EmpatraHostAtomicOperationStatus;
+	threadId?: string;
+	turnId?: string;
+}
 
 export interface EmpatraHostFailure {
 	code: string;
@@ -1275,6 +1300,15 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				...(parsed.sortDirection === undefined ? {} : { sortDirection: parsed.sortDirection }),
 				threadId: identifier(parsed.threadId, "threadId"),
 				type: "thread_turns",
+			};
+		case "atomic_operation_status":
+			if (!hasOnlyKeys(parsed, ["id", "operationId", "type"])) {
+				throw new EmpatraHostProtocolError("invalid_request", "atomic_operation_status contains unknown fields");
+			}
+			return {
+				id,
+				operationId: identifier(parsed.operationId, "operationId"),
+				type: "atomic_operation_status",
 			};
 		case "goal_get":
 		case "goal_clear":
