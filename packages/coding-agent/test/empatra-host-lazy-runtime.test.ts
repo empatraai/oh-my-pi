@@ -7,7 +7,10 @@ import type {
 	EmpatraHostToolOutboundFrame,
 } from "../src/modes/empatra-host/protocol";
 import type { EmpatraHostRuntime } from "../src/modes/empatra-host/server";
-import type { EmpatraHostSubagentRunner } from "../src/modes/empatra-host/subagent-broker";
+import {
+	EMPATRA_HOST_SUBAGENT_CAPABILITY,
+	type EmpatraHostSubagentRunner,
+} from "../src/modes/empatra-host/subagent-broker";
 
 const initializeCommand: EmpatraHostInitializeCommand = {
 	capability: "c".repeat(48),
@@ -74,5 +77,20 @@ describe("LazyEmpatraHostRuntime", () => {
 
 		await lazy.initialize(initializeCommand);
 		expect(receivedRunner).toBe(runner);
+	});
+
+	test("advertises an injected subagent capability before lazy initialization", () => {
+		const runner: EmpatraHostSubagentRunner = {
+			run: async () => ({ output: "", status: "completed" }),
+		};
+		const injected = new LazyEmpatraHostRuntime(async () => {
+			throw new Error("runtime must stay lazy");
+		}, { subagentRunner: runner });
+		const defaultRuntime = new LazyEmpatraHostRuntime(async () => {
+			throw new Error("runtime must stay lazy");
+		});
+
+		expect(injected.getAdvertisedCapabilities()).toContain(EMPATRA_HOST_SUBAGENT_CAPABILITY);
+		expect(defaultRuntime.getAdvertisedCapabilities()).not.toContain(EMPATRA_HOST_SUBAGENT_CAPABILITY);
 	});
 });

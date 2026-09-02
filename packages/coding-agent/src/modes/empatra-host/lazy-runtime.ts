@@ -5,6 +5,7 @@ import type {
 	EmpatraHostToolOutboundFrame,
 } from "./protocol";
 import { EMPATRA_HOST_CAPABILITIES } from "./protocol";
+import { EMPATRA_HOST_SUBAGENT_CAPABILITY } from "./subagent-broker";
 import type {
 	EmpatraHostSubagentCloseCommand,
 	EmpatraHostSubagentInterruptCommand,
@@ -55,7 +56,13 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 	}
 
 	getAdvertisedCapabilities() {
-		return this.#runtime?.getAdvertisedCapabilities?.() ?? EMPATRA_HOST_CAPABILITIES;
+		if (this.#runtime) return this.#runtime.getAdvertisedCapabilities?.() ?? EMPATRA_HOST_CAPABILITIES;
+		// The server emits host_ready before host_initialize loads the runtime.
+		// Reflect only explicitly injected seams here; the default CLI remains
+		// fail-closed and does not advertise a capability it cannot serve.
+		return this.#runtimeOptions.subagentRunner || this.#runtimeOptions.subagentRpcTransport
+			? [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY]
+			: EMPATRA_HOST_CAPABILITIES;
 	}
 
 	spawnSubagent(command: EmpatraHostSubagentSpawnCommand): Promise<unknown> {

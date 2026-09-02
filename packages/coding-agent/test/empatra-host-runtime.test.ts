@@ -6,7 +6,9 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import {
 	computeEmpatraHostToolCatalogRevision,
+	createEmpatraHostSubagentRpcTransport,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
+	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	EMPATRA_HOST_THREAD_READ_TARGET_BYTES,
 	EMPATRA_HOST_TOOL_ENTRY,
 	EMPATRA_HOST_TOOL_ENTRY_VERSION,
@@ -196,6 +198,67 @@ afterEach(async () => {
 });
 
 describe("Empatra host AgentSession runtime", () => {
+	test("routes lifecycle commands through the injected RPC broker", async () => {
+		const host = await temporaryHost();
+		const events: unknown[] = [];
+		let finishPrompt!: () => void;
+		const session = new FakeSession();
+		session.onPrompt = () => new Promise<void>(resolve => {
+			finishPrompt = resolve;
+		});
+		let transport!: ReturnType<typeof createEmpatraHostSubagentRpcTransport>;
+		transport = createEmpatraHostSubagentRpcTransport({
+			capabilities: [EMPATRA_HOST_SUBAGENT_CAPABILITY],
+			emitEvent: async event => {
+				events.push(event);
+				transport.handleResponse({
+					data: { childId: "child-from-main", index: 0, status: "running" },
+					id: event.requestId,
+					success: true,
+					type: "subagent_response",
+				});
+			},
+		});
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async () => session,
+			subagentRpcTransport: transport,
+		});
+		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+		const created = (await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-rpc-subagent-session",
+			modelId: "managed-model",
+			operationId: "operation-rpc-subagent-session",
+			systemPrompt: "Empatra system prompt",
+			type: "thread_create",
+		})) as { generation: number; threadId: string };
+		const started = (await runtime.startTurn({
+			expectedGeneration: created.generation,
+			id: "start-rpc-subagent-turn",
+			message: "Проверь через основной процесс",
+			modelId: "managed-model",
+			systemPrompt: "Empatra system prompt",
+			threadId: created.threadId,
+			turnId: "rpc-subagent-turn",
+			type: "turn_start",
+		})) as { generation: number };
+
+		await expect(
+			runtime.spawnSubagent({
+				assignment: "Проверь контракт",
+				generation: started.generation,
+				id: "rpc-spawn",
+				parentThreadId: created.threadId,
+				parentTurnId: "rpc-subagent-turn",
+				type: "subagent_spawn",
+			}),
+		).resolves.toMatchObject({ childId: "child-from-main", status: "running" });
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ operation: "spawn", threadId: created.threadId, turnId: "rpc-subagent-turn" });
+		finishPrompt();
+		await runtime.dispose();
+	});
+
 	test("holds exclusive process authority for a private session CAS until dispose", async () => {
 		const host = await temporaryHost();
 		const first = new EmpatraHostAgentRuntime({ sessionFactory: async () => new FakeSession() });

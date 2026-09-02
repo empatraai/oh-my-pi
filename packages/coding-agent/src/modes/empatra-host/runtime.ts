@@ -89,6 +89,7 @@ import {
 	type EmpatraHostSubagentCloseCommand,
 	type EmpatraHostSubagentInterruptCommand,
 	type EmpatraHostSubagentListCommand,
+	type EmpatraHostSubagentScope,
 	type EmpatraHostSubagentRunner,
 	type EmpatraHostSubagentResponseCommand,
 	type EmpatraHostSubagentRpcTransport,
@@ -989,27 +990,36 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 
 	spawnSubagent(command: EmpatraHostSubagentSpawnCommand): Promise<unknown> {
 		this.#requireSubagentParent(command);
-		return this.#requireSubagentController().spawn(command);
+		if (this.#subagentController) return this.#subagentController.spawn(command);
+		return this.#requireSubagentRpcBroker().spawn(this.#subagentScope(command), {
+			...(command.agentName === undefined ? {} : { agentName: command.agentName }),
+			assignment: command.assignment,
+			...(command.modelId === undefined ? {} : { modelId: command.modelId }),
+		});
 	}
 
 	steerSubagent(command: EmpatraHostSubagentSteerCommand): Promise<unknown> {
 		this.#requireSubagentParent(command);
-		return this.#requireSubagentController().steer(command, command.childId, command.message);
+		if (this.#subagentController) return this.#subagentController.steer(command, command.childId, command.message);
+		return this.#requireSubagentRpcBroker().steer(this.#subagentScope(command), command.childId, command.message);
 	}
 
 	interruptSubagent(command: EmpatraHostSubagentInterruptCommand): Promise<unknown> {
 		this.#requireSubagentParent(command);
-		return this.#requireSubagentController().interrupt(command, command.childId);
+		if (this.#subagentController) return this.#subagentController.interrupt(command, command.childId);
+		return this.#requireSubagentRpcBroker().interrupt(this.#subagentScope(command), command.childId);
 	}
 
 	closeSubagent(command: EmpatraHostSubagentCloseCommand): Promise<unknown> {
 		this.#requireSubagentParent(command);
-		return this.#requireSubagentController().close(command, command.childId);
+		if (this.#subagentController) return this.#subagentController.close(command, command.childId);
+		return this.#requireSubagentRpcBroker().close(this.#subagentScope(command), command.childId);
 	}
 
 	listSubagents(command: EmpatraHostSubagentListCommand): Promise<unknown> {
 		this.#requireSubagentParent(command);
-		return this.#requireSubagentController().list(command);
+		if (this.#subagentController) return this.#subagentController.list(command);
+		return this.#requireSubagentRpcBroker().list(this.#subagentScope(command));
 	}
 
 	/**
@@ -2416,11 +2426,20 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		return handle;
 	}
 
-	#requireSubagentController(): EmpatraHostSubagentController {
-		if (!this.#subagentController) {
+	#requireSubagentRpcBroker(): EmpatraHostSubagentRpcTransport["broker"] {
+		const broker = this.#subagentRpcTransport?.broker;
+		if (!broker) {
 			throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle is not wired by the main host");
 		}
-		return this.#subagentController;
+		return broker;
+	}
+
+	#subagentScope(command: EmpatraHostSubagentScope): EmpatraHostSubagentScope {
+		return {
+			generation: command.generation,
+			parentThreadId: command.parentThreadId,
+			parentTurnId: command.parentTurnId,
+		};
 	}
 
 	#requireSubagentParent(command: {
