@@ -79,9 +79,11 @@ describe("Empatra host atomic create/fork and start", () => {
 	test("persists a secret-free receipt, starts once, and rejects digest conflicts", async () => {
 		const host = await temporaryHost();
 		const sessions: AtomicFakeSession[] = [];
+		const factoryOptions: EmpatraHostSessionFactoryOptions[] = [];
 		const completed = Promise.withResolvers<EmpatraHostEvent>();
 		const runtime = new EmpatraHostAgentRuntime({
-			sessionFactory: async () => {
+			sessionFactory: async options => {
+				factoryOptions.push(options);
 				const session = new AtomicFakeSession();
 				sessions.push(session);
 				return session;
@@ -92,6 +94,7 @@ describe("Empatra host atomic create/fork and start", () => {
 		});
 		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
 		const command = {
+			approvalMode: "yolo" as const,
 			cwd: await realpath(host.workspace),
 			id: "atomic-create-1",
 			message: "SECRET_ATOMIC_MESSAGE",
@@ -111,6 +114,7 @@ describe("Empatra host atomic create/fork and start", () => {
 		expect(await completed.promise).toMatchObject({ outcome: "completed", turnId: command.turnId });
 		expect(await runtime.startThreadAndTurn({ ...command, id: "atomic-create-repeat" })).toEqual(first);
 		expect(sessions[0]?.prompts).toEqual([command.message]);
+		expect(factoryOptions[0]?.settings.get("tools.approvalMode")).toBe("yolo");
 		expect(
 			await runtime.getAtomicOperationStatus({
 				id: "atomic-status-1",
@@ -133,7 +137,12 @@ describe("Empatra host atomic create/fork and start", () => {
 			}),
 		).toEqual({ operationId: "missing-operation", status: "missing" });
 		await expect(
-			runtime.startThreadAndTurn({ ...command, id: "atomic-create-conflict", message: "Different input" }),
+			runtime.startThreadAndTurn({
+				...command,
+				approvalMode: "always-ask",
+				id: "atomic-create-conflict",
+				message: "Different input",
+			}),
 		).rejects.toMatchObject({ code: "operation_conflict" });
 
 		const metadataPath = path.join(host.sessions, "runtime", "empatra-host-metadata.sqlite3");

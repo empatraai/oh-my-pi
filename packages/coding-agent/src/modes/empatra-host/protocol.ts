@@ -63,6 +63,17 @@ export interface EmpatraHostSkill {
  */
 export type EmpatraHostReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+/**
+ * Host-owned approval modes exposed to Empatra Studio.
+ *
+ * The host deliberately omits OMP's `write` mode: Studio currently exposes
+ * only a workspace-write/on-request policy and a full-access/never policy.
+ * Mapping those policies to this closed union keeps the trust boundary
+ * explicit and prevents a controller from smuggling sandbox semantics into
+ * the OMP process.
+ */
+export type EmpatraHostApprovalMode = "always-ask" | "yolo";
+
 /** Explicit host-owned execution mode with a typed proposal/resolution lifecycle. */
 export type EmpatraHostMode = "default" | "plan";
 
@@ -112,6 +123,7 @@ export interface EmpatraHostInitializeCommand {
 }
 
 export interface EmpatraHostThreadCreateCommand {
+	approvalMode?: EmpatraHostApprovalMode;
 	cwd: string;
 	id: string;
 	modelId: string;
@@ -130,6 +142,7 @@ export interface EmpatraHostThreadCreateAndStartCommand extends Omit<EmpatraHost
 }
 
 export interface EmpatraHostThreadForkCommand {
+	approvalMode?: EmpatraHostApprovalMode;
 	cwd?: string;
 	id: string;
 	mode?: EmpatraHostMode;
@@ -320,6 +333,7 @@ export interface EmpatraHostThreadRenameCommand {
 }
 
 export interface EmpatraHostTurnStartCommand {
+	approvalMode?: EmpatraHostApprovalMode;
 	expectedGeneration: number;
 	id: string;
 	images?: EmpatraHostImageDescriptor[];
@@ -340,6 +354,7 @@ export interface EmpatraHostTurnInterruptCommand {
 }
 
 export interface EmpatraHostTurnSteerCommand {
+	approvalMode?: EmpatraHostApprovalMode;
 	expectedGeneration: number;
 	id: string;
 	images?: EmpatraHostImageDescriptor[];
@@ -834,6 +849,12 @@ function optionalMode(value: unknown): EmpatraHostMode | undefined {
 	if (value === undefined) return undefined;
 	if (value === "default" || value === "plan") return value;
 	throw new EmpatraHostProtocolError("invalid_request", "mode is invalid");
+}
+
+function optionalApprovalMode(value: unknown): EmpatraHostApprovalMode | undefined {
+	if (value === undefined) return undefined;
+	if (value === "always-ask" || value === "yolo") return value;
+	throw new EmpatraHostProtocolError("invalid_request", "approvalMode is invalid");
 }
 
 function planResolutionFeedback(value: unknown): string | null | undefined {
@@ -1354,10 +1375,13 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				type: "thread_rollback",
 			};
 		case "thread_fork":
-			if (!hasOnlyKeys(parsed, ["cwd", "id", "mode", "operationId", "threadId", "type"])) {
+			if (!hasOnlyKeys(parsed, ["approvalMode", "cwd", "id", "mode", "operationId", "threadId", "type"])) {
 				throw new EmpatraHostProtocolError("invalid_request", "thread_fork contains unknown fields");
 			}
 			return {
+				...(optionalApprovalMode(parsed.approvalMode) === undefined
+					? {}
+					: { approvalMode: optionalApprovalMode(parsed.approvalMode) }),
 				...(parsed.cwd === undefined ? {} : { cwd: absolutePath(parsed.cwd, "cwd") }),
 				id,
 				...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
@@ -1387,10 +1411,24 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				type: "thread_read",
 			};
 		case "thread_create":
-			if (!hasOnlyKeys(parsed, ["cwd", "id", "mode", "modelId", "operationId", "systemPrompt", "type"])) {
+			if (
+				!hasOnlyKeys(parsed, [
+					"approvalMode",
+					"cwd",
+					"id",
+					"mode",
+					"modelId",
+					"operationId",
+					"systemPrompt",
+					"type",
+				])
+			) {
 				throw new EmpatraHostProtocolError("invalid_request", "thread_create contains unknown fields");
 			}
 			return {
+				...(optionalApprovalMode(parsed.approvalMode) === undefined
+					? {}
+					: { approvalMode: optionalApprovalMode(parsed.approvalMode) }),
 				cwd: absolutePath(parsed.cwd, "cwd"),
 				id,
 				...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
@@ -1402,6 +1440,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 		case "thread_create_and_start":
 			if (
 				!hasOnlyKeys(parsed, [
+					"approvalMode",
 					"cwd",
 					"id",
 					"images",
@@ -1420,6 +1459,9 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			{
 				const images = optionalImages(parsed.images);
 				return {
+					...(optionalApprovalMode(parsed.approvalMode) === undefined
+						? {}
+						: { approvalMode: optionalApprovalMode(parsed.approvalMode) }),
 					cwd: absolutePath(parsed.cwd, "cwd"),
 					id,
 					...(images ? { images } : {}),
@@ -1438,6 +1480,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 		case "thread_fork_and_start":
 			if (
 				!hasOnlyKeys(parsed, [
+					"approvalMode",
 					"cwd",
 					"id",
 					"images",
@@ -1455,6 +1498,9 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			{
 				const images = optionalImages(parsed.images);
 				return {
+					...(optionalApprovalMode(parsed.approvalMode) === undefined
+						? {}
+						: { approvalMode: optionalApprovalMode(parsed.approvalMode) }),
 					...(parsed.cwd === undefined ? {} : { cwd: absolutePath(parsed.cwd, "cwd") }),
 					id,
 					...(images ? { images } : {}),
@@ -1472,6 +1518,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 		case "turn_start":
 			if (
 				!hasOnlyKeys(parsed, [
+					"approvalMode",
 					"expectedGeneration",
 					"id",
 					"images",
@@ -1488,6 +1535,9 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			{
 				const images = optionalImages(parsed.images);
 				return {
+					...(optionalApprovalMode(parsed.approvalMode) === undefined
+						? {}
+						: { approvalMode: optionalApprovalMode(parsed.approvalMode) }),
 					expectedGeneration: boundedInteger(
 						parsed.expectedGeneration,
 						"expectedGeneration",
@@ -1525,6 +1575,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 		case "turn_steer":
 			if (
 				!hasOnlyKeys(parsed, [
+					"approvalMode",
 					"expectedGeneration",
 					"id",
 					"images",
@@ -1540,6 +1591,9 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			{
 				const images = optionalImages(parsed.images);
 				return {
+					...(optionalApprovalMode(parsed.approvalMode) === undefined
+						? {}
+						: { approvalMode: optionalApprovalMode(parsed.approvalMode) }),
 					expectedGeneration: boundedInteger(
 						parsed.expectedGeneration,
 						"expectedGeneration",

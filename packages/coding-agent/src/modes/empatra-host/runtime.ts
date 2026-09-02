@@ -45,6 +45,7 @@ import {
 	prepareEmpatraHostImages,
 } from "./media-input";
 import type {
+	EmpatraHostApprovalMode,
 	EmpatraHostAtomicOperationStatusResponse,
 	EmpatraHostCommand,
 	EmpatraHostEvent,
@@ -113,6 +114,7 @@ import { EmpatraHostWorkspacePolicy } from "./workspace-policy";
 
 const EMPATRA_THREAD_CONFIG_ENTRY = "empatra.host.thread-config.v1";
 const EMPATRA_THREAD_CONFIG_VERSION = 1 as const;
+const DEFAULT_APPROVAL_MODE: EmpatraHostApprovalMode = "always-ask";
 const EMPATRA_THREAD_LIFECYCLE_ENTRY = "empatra.host.thread-lifecycle.v1";
 const EMPATRA_THREAD_LIFECYCLE_VERSION = 1 as const;
 const MAX_STREAM_EVENT_BYTES = 64 * 1024;
@@ -136,6 +138,7 @@ type TurnStartCommand = Extract<EmpatraHostCommand, { type: "turn_start" }>;
 type TurnSteerCommand = Extract<EmpatraHostCommand, { type: "turn_steer" }>;
 
 interface PersistedThreadConfig {
+	approvalMode?: EmpatraHostApprovalMode;
 	mode?: EmpatraHostMode;
 	modelId: string;
 	operationId: string;
@@ -323,7 +326,9 @@ function acquireBlobGarbageCollectionAuthority(agentDir: string): Database {
 }
 
 interface ThreadHandle {
+	defaultApprovalMode: EmpatraHostApprovalMode;
 	activeTurn: {
+		approvalMode: EmpatraHostApprovalMode;
 		acceptingEvents: boolean;
 		acceptingSteer: boolean;
 		activeAssistantMessageIndex: number | null;
@@ -350,6 +355,7 @@ interface ThreadHandle {
 	dispose(): Promise<void>;
 	eventTail: Promise<void>;
 	queuedEventBytes: number;
+	settings: Settings;
 	session: EmpatraHostSession;
 	sessionManager: SessionManager;
 	hostTools: EmpatraHostSessionTools;
@@ -405,6 +411,7 @@ function parsePersistedThreadConfig(value: unknown): PersistedThreadConfig | und
 	if (
 		!isRecord(value) ||
 		value.version !== EMPATRA_THREAD_CONFIG_VERSION ||
+		(value.approvalMode !== undefined && value.approvalMode !== "always-ask" && value.approvalMode !== "yolo") ||
 		(value.mode !== undefined && value.mode !== "default" && value.mode !== "plan") ||
 		typeof value.modelId !== "string" ||
 		typeof value.operationId !== "string" ||
@@ -413,6 +420,7 @@ function parsePersistedThreadConfig(value: unknown): PersistedThreadConfig | und
 		return undefined;
 	}
 	return {
+		...(value.approvalMode === undefined ? {} : { approvalMode: value.approvalMode }),
 		...(value.mode === undefined ? {} : { mode: value.mode }),
 		modelId: value.modelId,
 		operationId: value.operationId,
@@ -1026,6 +1034,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			const requestedCwd = await runtime.policy.requireCwd(command.cwd);
 			const config = findThreadConfig(state.handle.sessionManager);
 			this.#assertCreateMatches(state.handle.sessionManager, command, requestedCwd);
+			this.#configureApprovalMode(state.handle, command.approvalMode ?? config.approvalMode);
 			this.#configureMode(state.handle, command.mode ?? config.mode);
 			return { generation: state.generation, threadId: state.handle.threadId };
 		}
@@ -1037,6 +1046,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				enableFileBlobGarbageCollection: true,
 			});
 			sessionManager.appendCustomEntry(EMPATRA_THREAD_CONFIG_ENTRY, {
+				...(command.approvalMode === undefined ? {} : { approvalMode: command.approvalMode }),
 				...(command.mode === undefined ? {} : { mode: command.mode }),
 				modelId: command.modelId,
 				operationId: command.operationId,
@@ -1044,7 +1054,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				version: EMPATRA_THREAD_CONFIG_VERSION,
 			} satisfies PersistedThreadConfig);
 			await sessionManager.ensureOnDisk();
-			return this.#createHandle(sessionManager, model, command.systemPrompt);
+			return this.#createHandle(sessionManager, model, command.systemPrompt, command.approvalMode);
 		});
 		this.#configureMode(state.handle, command.mode);
 		this.#recordThreadMetadata(state.handle, command.operationId, false);
@@ -1054,12 +1064,13 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	async startThreadAndTurn(command: EmpatraHostThreadCreateAndStartCommand): Promise<unknown> {
 		return this.#withOperationCommand(command.operationId, async () => {
 			let inputSha256 = digestEmpatraHostAtomicInput([
-				"empatra.host.create-and-start.v5",
+				"empatra.host.create-and-start.v6",
 				command.operationId,
 				command.cwd,
 				command.modelId,
 				command.systemPrompt,
 				command.mode ?? "",
+				command.approvalMode ?? "",
 				command.reasoningEffort ?? "",
 				command.message,
 				digestEmpatraHostImageDescriptors(command.images),
@@ -1071,19 +1082,35 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				existing &&
 				existing.inputSha256 !== inputSha256 &&
 				command.reasoningEffort == null &&
-				command.mode == null
+				command.mode == null &&
+				command.approvalMode == null
 			) {
-				const legacyInputSha256 = digestEmpatraHostAtomicInput([
-					"empatra.host.create-and-start.v3",
+				const previousInputSha256 = digestEmpatraHostAtomicInput([
+					"empatra.host.create-and-start.v5",
 					command.operationId,
 					command.cwd,
 					command.modelId,
 					command.systemPrompt,
+					command.mode ?? "",
+					command.reasoningEffort ?? "",
 					command.message,
 					digestEmpatraHostImageDescriptors(command.images),
 					command.turnId,
 				]);
-				if (existing.inputSha256 === legacyInputSha256) inputSha256 = legacyInputSha256;
+				if (existing.inputSha256 === previousInputSha256) inputSha256 = previousInputSha256;
+				else {
+					const legacyInputSha256 = digestEmpatraHostAtomicInput([
+						"empatra.host.create-and-start.v3",
+						command.operationId,
+						command.cwd,
+						command.modelId,
+						command.systemPrompt,
+						command.message,
+						digestEmpatraHostImageDescriptors(command.images),
+						command.turnId,
+					]);
+					if (existing.inputSha256 === legacyInputSha256) inputSha256 = legacyInputSha256;
+				}
 			}
 			if (existing) {
 				const receipt = runtime.atomicOperationStore.accept({
@@ -1100,6 +1127,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					command.images,
 					command.reasoningEffort ?? null,
 					command.mode,
+					command.approvalMode,
 				);
 			}
 			const preparedImages = await prepareEmpatraHostImages(
@@ -1113,6 +1141,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					id: command.id,
 					modelId: command.modelId,
 					...(command.mode === undefined ? {} : { mode: command.mode }),
+					...(command.approvalMode === undefined ? {} : { approvalMode: command.approvalMode }),
 					operationId: command.operationId,
 					systemPrompt: command.systemPrompt,
 					type: "thread_create",
@@ -1131,6 +1160,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					command.images,
 					command.reasoningEffort ?? null,
 					command.mode,
+					command.approvalMode,
 					preparedImages,
 				);
 			} catch (error) {
@@ -1166,6 +1196,9 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					let persisted = false;
 					try {
 						forked.appendCustomEntry(EMPATRA_THREAD_CONFIG_ENTRY, {
+							...(command.approvalMode === undefined && sourceConfig.approvalMode === undefined
+								? {}
+								: { approvalMode: command.approvalMode ?? sourceConfig.approvalMode }),
 							...(command.mode === undefined && sourceConfig.mode === undefined
 								? {}
 								: { mode: command.mode ?? sourceConfig.mode }),
@@ -1184,6 +1217,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 							forked,
 							this.#requireModel(sourceConfig.modelId),
 							sourceConfig.systemPrompt,
+							command.approvalMode ?? sourceConfig.approvalMode,
 						);
 					} catch (error) {
 						const sessionPath = forked.getSessionFile();
@@ -1206,10 +1240,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	async forkThreadAndStart(command: EmpatraHostThreadForkAndStartCommand): Promise<unknown> {
 		return this.#withOperationCommand(command.operationId, async () => {
 			let inputSha256 = digestEmpatraHostAtomicInput([
-				"empatra.host.fork-and-start.v5",
+				"empatra.host.fork-and-start.v6",
 				command.operationId,
 				command.threadId,
 				command.mode ?? "",
+				command.approvalMode ?? "",
 				command.cwd ?? "",
 				command.reasoningEffort ?? "",
 				command.message,
@@ -1222,18 +1257,33 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				existing &&
 				existing.inputSha256 !== inputSha256 &&
 				command.reasoningEffort == null &&
-				command.mode == null
+				command.mode == null &&
+				command.approvalMode == null
 			) {
-				const legacyInputSha256 = digestEmpatraHostAtomicInput([
-					"empatra.host.fork-and-start.v3",
+				const previousInputSha256 = digestEmpatraHostAtomicInput([
+					"empatra.host.fork-and-start.v5",
 					command.operationId,
 					command.threadId,
+					command.mode ?? "",
 					command.cwd ?? "",
+					command.reasoningEffort ?? "",
 					command.message,
 					digestEmpatraHostImageDescriptors(command.images),
 					command.turnId,
 				]);
-				if (existing.inputSha256 === legacyInputSha256) inputSha256 = legacyInputSha256;
+				if (existing.inputSha256 === previousInputSha256) inputSha256 = previousInputSha256;
+				else {
+					const legacyInputSha256 = digestEmpatraHostAtomicInput([
+						"empatra.host.fork-and-start.v3",
+						command.operationId,
+						command.threadId,
+						command.cwd ?? "",
+						command.message,
+						digestEmpatraHostImageDescriptors(command.images),
+						command.turnId,
+					]);
+					if (existing.inputSha256 === legacyInputSha256) inputSha256 = legacyInputSha256;
+				}
 			}
 			if (existing) {
 				const receipt = runtime.atomicOperationStore.accept({
@@ -1250,6 +1300,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					command.images,
 					command.reasoningEffort ?? null,
 					command.mode,
+					command.approvalMode,
 				);
 			}
 			const preparedImages = await this.#prepareImagesForThread(command.threadId, command.images);
@@ -1260,6 +1311,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					operationId: command.operationId,
 					threadId: command.threadId,
 					...(command.mode === undefined ? {} : { mode: command.mode }),
+					...(command.approvalMode === undefined ? {} : { approvalMode: command.approvalMode }),
 					type: "thread_fork",
 				})) as { generation: number; threadId: string };
 				const receipt = this.#requireInitialized().atomicOperationStore.accept({
@@ -1276,6 +1328,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					command.images,
 					command.reasoningEffort ?? null,
 					command.mode,
+					command.approvalMode,
 					preparedImages,
 				);
 			} catch (error) {
@@ -1591,6 +1644,8 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 					);
 					await handle.sessionManager.flush();
 				}
+				this.#configureApprovalMode(handle, command.approvalMode ?? activeTurn.approvalMode);
+				activeTurn.approvalMode = command.approvalMode ?? activeTurn.approvalMode;
 				await handle.session.steer(command.message, preparedImages?.images);
 				if (preparedImages) activeTurn.imageAdmissions.push(preparedImages);
 				accepted = true;
@@ -1682,6 +1737,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		this.#closeDanglingTools(handle);
 		if (handle.activeTurn) handle.activeTurn.acceptingEvents = false;
 		await handle.eventTail;
+		this.#configureApprovalMode(handle, handle.defaultApprovalMode);
 		if (!error && handle.activeTurn?.toolFailure) error = handle.activeTurn.toolFailure;
 		if (!error && handle.streamFailure) error = handle.streamFailure;
 		const generation = activeGeneration + 1;
@@ -1771,14 +1827,15 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				const session = await this.#findThread(command.threadId);
 				return this.#openThread(session.path);
 			});
-			this.#applyReasoningEffort(state.handle, command.reasoningEffort ?? null);
-			this.#configureMode(state.handle, command.mode);
 			const activeGeneration = this.#registry.beginTurn(
 				command.threadId,
 				command.turnId,
 				command.expectedGeneration,
 			);
 			try {
+				this.#applyReasoningEffort(state.handle, command.reasoningEffort ?? null);
+				this.#configureApprovalMode(state.handle, command.approvalMode ?? state.handle.defaultApprovalMode);
+				this.#configureMode(state.handle, command.mode);
 				if (!options.reusePersistedStart) {
 					state.handle.sessionManager.appendCustomEntry(EMPATRA_TURN_ENTRY, {
 						phase: "started",
@@ -1811,6 +1868,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				throw new EmpatraHostProtocolError("turn_state_corrupt", "Turn start marker was not persisted");
 			}
 			state.handle.activeTurn = {
+				approvalMode: command.approvalMode ?? state.handle.defaultApprovalMode,
 				acceptingEvents: true,
 				acceptingSteer: true,
 				activeAssistantMessageIndex: null,
@@ -1877,6 +1935,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		descriptors: readonly EmpatraHostImageDescriptor[] | undefined,
 		reasoningEffort: EmpatraHostReasoningEffort | null,
 		mode: EmpatraHostMode | undefined,
+		approvalMode: EmpatraHostApprovalMode | undefined,
 		preloadedImages?: EmpatraHostPreparedImages,
 	): Promise<{ generation: number; operationId: string; threadId: string; turnId: string }> {
 		return this.#withThreadCommand(receipt.threadId, async () => {
@@ -1929,6 +1988,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 						id: receipt.operationId,
 						message,
 						...(mode === undefined ? {} : { mode }),
+						...(approvalMode === undefined ? {} : { approvalMode }),
 						reasoningEffort,
 						threadId: receipt.threadId,
 						turnId: receipt.turnId,
@@ -2114,6 +2174,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		const state = await this.#registry.open(session.id, () => this.#openThread(session.path));
 		this.#assertForkMatches(state.handle.sessionManager, command, requestedCwd);
 		const config = findThreadConfig(state.handle.sessionManager);
+		this.#configureApprovalMode(state.handle, command.approvalMode ?? config.approvalMode);
 		this.#configureMode(state.handle, command.mode ?? config.mode);
 		return { generation: state.generation, threadId: state.handle.threadId };
 	}
@@ -2127,6 +2188,8 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		if (
 			config.operationId !== command.operationId ||
 			manager.getHeader()?.parentSession !== command.threadId ||
+			(command.approvalMode !== undefined &&
+				(config.approvalMode ?? DEFAULT_APPROVAL_MODE) !== command.approvalMode) ||
 			(command.mode !== undefined && (config.mode ?? "default") !== command.mode) ||
 			(requestedCwd !== undefined && path.resolve(manager.getCwd()) !== requestedCwd)
 		) {
@@ -2143,6 +2206,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			config.operationId !== command.operationId ||
 			config.modelId !== command.modelId ||
 			config.systemPrompt !== command.systemPrompt ||
+			(config.approvalMode ?? DEFAULT_APPROVAL_MODE) !== (command.approvalMode ?? DEFAULT_APPROVAL_MODE) ||
 			(config.mode ?? "default") !== (command.mode ?? "default") ||
 			path.resolve(manager.getCwd()) !== requestedCwd
 		) {
@@ -2176,6 +2240,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			return;
 		}
 		session.setThinkingLevel(effort === "none" ? ThinkingLevel.Off : (effort as ThinkingLevel));
+	}
+
+	/** Applies a host-approved mode to the current session without persisting it. */
+	#configureApprovalMode(handle: ThreadHandle, mode: EmpatraHostApprovalMode | undefined): void {
+		handle.settings.override("tools.approvalMode", mode ?? handle.defaultApprovalMode);
 	}
 
 	async #openSessionManager(sessionPath: string): Promise<SessionManager> {
@@ -2237,13 +2306,17 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		sessionManager: SessionManager,
 		model: Model<"openai-responses">,
 		systemPrompt: string,
+		defaultApprovalMode: EmpatraHostApprovalMode = DEFAULT_APPROVAL_MODE,
 	): Promise<ThreadHandle> {
 		const runtime = this.#requireInitialized();
 		const cwd = await runtime.policy.requireCwd(sessionManager.getCwd());
 		if (model.contextWindow === null) {
 			throw new EmpatraHostProtocolError("model_invalid", "Injected model is missing its context window");
 		}
-		const settings = Settings.isolated({ "tools.approvalMode": "always-ask" }, { agentDir: runtime.agentDir, cwd });
+		const settings = Settings.isolated(
+			{ "tools.approvalMode": defaultApprovalMode },
+			{ agentDir: runtime.agentDir, cwd },
+		);
 		const session = await this.#sessionFactory({
 			agentDir: runtime.agentDir,
 			capability: runtime.capability,
@@ -2270,6 +2343,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		});
 		handle = {
 			activeTurn: null,
+			defaultApprovalMode,
 			dispose: async () => {
 				handle.unsubscribe();
 				hostTools.dispose();
@@ -2281,6 +2355,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			queuedEventBytes: 0,
 			session,
 			sessionManager,
+			settings,
 			hostTools,
 			model,
 			modelContextWindow: model.contextWindow,
@@ -2736,7 +2811,12 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		try {
 			await recoverInterruptedToolExecutions(sessionManager);
 			const config = findThreadConfig(sessionManager);
-			return await this.#createHandle(sessionManager, this.#requireModel(config.modelId), config.systemPrompt);
+			return await this.#createHandle(
+				sessionManager,
+				this.#requireModel(config.modelId),
+				config.systemPrompt,
+				config.approvalMode,
+			);
 		} catch (error) {
 			await sessionManager.close();
 			throw error;

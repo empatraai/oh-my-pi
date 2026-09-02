@@ -292,6 +292,65 @@ await new Promise(() => {});`,
 		await runtime.dispose();
 	});
 
+	test("applies a host approval override only to its turn and restores the thread default", async () => {
+		const host = await temporaryHost();
+		const observedModes: unknown[] = [];
+		const completions = new Map<string, PromiseWithResolvers<void>>();
+		let session: FakeSession | undefined;
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async input => {
+				session = new FakeSession();
+				session.onPrompt = async () => {
+					observedModes.push(input.settings.get("tools.approvalMode"));
+				};
+				return session;
+			},
+		});
+		runtime.setEventSink(async event => {
+			if (event.event === "turn_completed") completions.get(event.turnId)?.resolve();
+		});
+		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+		const created = (await runtime.startThread({
+			approvalMode: "yolo",
+			cwd: host.workspace,
+			id: "approval-create",
+			modelId: "managed-model",
+			operationId: "approval-operation",
+			systemPrompt: "System",
+			type: "thread_create",
+		})) as { generation: number; threadId: string };
+		expect(observedModes).toEqual([]);
+
+		const firstCompletion = Promise.withResolvers<void>();
+		completions.set("approval-turn-1", firstCompletion);
+		await runtime.startTurn({
+			approvalMode: "always-ask",
+			expectedGeneration: created.generation,
+			id: "approval-turn-start-1",
+			message: "Проверить режим",
+			threadId: created.threadId,
+			turnId: "approval-turn-1",
+			type: "turn_start",
+		});
+		await firstCompletion.promise;
+		expect(observedModes).toEqual(["always-ask"]);
+		expect(session).toBeDefined();
+
+		const secondCompletion = Promise.withResolvers<void>();
+		completions.set("approval-turn-2", secondCompletion);
+		await runtime.startTurn({
+			expectedGeneration: 2,
+			id: "approval-turn-start-2",
+			message: "Проверить восстановление",
+			threadId: created.threadId,
+			turnId: "approval-turn-2",
+			type: "turn_start",
+		});
+		await secondCompletion.promise;
+		expect(observedModes).toEqual(["always-ask", "yolo"]);
+		await runtime.dispose();
+	});
+
 	test("rejects a skill descriptor that escapes private session storage", async () => {
 		const host = await temporaryHost();
 		const outsideRoot = path.join(host.root, "outside-skill");

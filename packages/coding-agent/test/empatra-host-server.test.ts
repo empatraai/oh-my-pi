@@ -157,6 +157,62 @@ describe("Empatra host protocol server", () => {
 		expect(delivered).toEqual(["1234", "56", "78"]);
 	});
 
+	test("forwards the bounded approval mode and fails closed on unknown values", async () => {
+		let receivedApprovalMode: unknown;
+		const output: string[] = [];
+		await runEmpatraHostServer({
+			input: inputStream([
+				initializeCommand(),
+				{
+					approvalMode: "yolo",
+					expectedGeneration: 0,
+					id: "approval-server-turn",
+					message: "Выполни проверку",
+					threadId: "thread-approval-server",
+					turnId: "turn-approval-server",
+					type: "turn_start",
+				},
+				{ id: "approval-server-shutdown", type: "host_shutdown" },
+			]),
+			runtime: runtime({
+				async startTurn(command) {
+					receivedApprovalMode = command.approvalMode;
+					return { generation: 1, threadId: command.threadId, turnId: command.turnId };
+				},
+			}),
+			write: async frame => {
+				output.push(frame);
+			},
+		});
+		expect(receivedApprovalMode).toBe("yolo");
+		expect(output.map(frame => JSON.parse(frame))).toContainEqual(
+			expect.objectContaining({ id: "approval-server-turn", success: true }),
+		);
+
+		const invalidOutput: string[] = [];
+		await runEmpatraHostServer({
+			input: inputStream([
+				initializeCommand(),
+				{
+					approvalMode: "never",
+					expectedGeneration: 0,
+					id: "approval-server-invalid",
+					message: "Не выполнять",
+					threadId: "thread-approval-server",
+					turnId: "turn-approval-invalid",
+					type: "turn_start",
+				},
+			]),
+			runtime: runtime(),
+			write: async frame => {
+				invalidOutput.push(frame);
+			},
+		});
+		expect(invalidOutput.map(frame => JSON.parse(frame))).toContainEqual(
+			expect.objectContaining({ code: "invalid_request", id: null, success: false }),
+		);
+	});
+
 	test("writes turn acceptance before the first event and bounds the activation barrier", async () => {
 		let sink: ((event: EmpatraHostEvent) => Promise<void>) | undefined;
 		let deliveries: PromiseSettledResult<void>[] = [];

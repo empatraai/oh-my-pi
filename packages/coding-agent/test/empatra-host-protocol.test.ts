@@ -188,6 +188,28 @@ describe("Empatra host protocol", () => {
 		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...turn, mode: "unknown" }))).toThrow("mode is invalid");
 	});
 
+	test("accepts only host-owned approval modes and defaults by omission", () => {
+		const turn = {
+			expectedGeneration: 0,
+			id: "approval-turn-1",
+			message: "Выполни проверку",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			type: "turn_start" as const,
+		};
+		expect(parseEmpatraHostCommand(JSON.stringify(turn))).toEqual(turn);
+		expect(parseEmpatraHostCommand(JSON.stringify({ ...turn, approvalMode: "yolo" }))).toEqual({
+			...turn,
+			approvalMode: "yolo",
+		});
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...turn, approvalMode: "write" }))).toThrow(
+			"approvalMode is invalid",
+		);
+		expect(() =>
+			parseEmpatraHostCommand(JSON.stringify({ ...turn, approvalMode: "never", sandbox: "danger-full-access" })),
+		).toThrow("unknown fields");
+	});
+
 	test("accepts strict thread lifecycle commands and list filters", () => {
 		expect(
 			parseEmpatraHostCommand(
