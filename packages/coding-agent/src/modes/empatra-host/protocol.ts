@@ -7,10 +7,14 @@ import type {
 	EmpatraHostUserInputResponse,
 } from "./interaction-broker";
 
-export const EMPATRA_HOST_PROTOCOL_VERSION = 4 as const;
+export const EMPATRA_HOST_PROTOCOL_VERSION = 5 as const;
 export const EMPATRA_HOST_MAX_FRAME_BYTES = 1024 * 1024;
 export const EMPATRA_HOST_MAX_MODELS = 1024;
 export const EMPATRA_HOST_MAX_WORKSPACE_ROOTS = 128;
+export const EMPATRA_HOST_MAX_SKILLS = 256;
+export const EMPATRA_HOST_MAX_SKILL_NAME_BYTES = 128;
+export const EMPATRA_HOST_MAX_SKILL_DESCRIPTION_BYTES = 8192;
+export const EMPATRA_HOST_MAX_SKILL_SOURCE_BYTES = 128;
 export const EMPATRA_HOST_MAX_HOST_TOOLS = 256;
 export const EMPATRA_HOST_MAX_HOST_TOOL_ARGUMENT_BYTES = 256 * 1024;
 export const EMPATRA_HOST_MAX_HOST_TOOL_RESULT_BYTES = 512 * 1024;
@@ -36,6 +40,19 @@ export interface EmpatraHostModel {
 	reasoning: boolean;
 	reasoningEfforts?: EmpatraHostReasoningEffort[];
 	supportsTools: boolean;
+}
+
+/**
+ * A main-process materialized skill. The host accepts only paths under the
+ * private session directory; it never discovers arbitrary user directories.
+ */
+export interface EmpatraHostSkill {
+	baseDir: string;
+	description: string;
+	filePath: string;
+	hide?: boolean;
+	name: string;
+	source: string;
 }
 
 /**
@@ -82,6 +99,7 @@ export interface EmpatraHostInitializeCommand {
 	gatewayBaseUrl: string;
 	id: string;
 	models: EmpatraHostModel[];
+	skills?: EmpatraHostSkill[];
 	protocolVersion: typeof EMPATRA_HOST_PROTOCOL_VERSION;
 	sessionDirectory: string;
 	type: "host_initialize";
@@ -939,6 +957,24 @@ function model(value: unknown): EmpatraHostModel {
 	};
 }
 
+function skill(value: unknown): EmpatraHostSkill {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, ["baseDir", "description", "filePath", "hide", "name", "source"]) ||
+		(value.hide !== undefined && typeof value.hide !== "boolean")
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", "skills contains an invalid skill");
+	}
+	return {
+		baseDir: absolutePath(value.baseDir, "skill.baseDir"),
+		description: boundedString(value.description, "skill.description", 0, EMPATRA_HOST_MAX_SKILL_DESCRIPTION_BYTES),
+		filePath: absolutePath(value.filePath, "skill.filePath"),
+		...(value.hide === undefined ? {} : { hide: value.hide === true }),
+		name: boundedString(value.name, "skill.name", 1, EMPATRA_HOST_MAX_SKILL_NAME_BYTES),
+		source: boundedString(value.source, "skill.source", 1, EMPATRA_HOST_MAX_SKILL_SOURCE_BYTES),
+	};
+}
+
 function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeCommand {
 	if (
 		!hasOnlyKeys(value, [
@@ -946,6 +982,7 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 			"gatewayBaseUrl",
 			"id",
 			"models",
+			"skills",
 			"protocolVersion",
 			"sessionDirectory",
 			"type",
@@ -955,6 +992,7 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 		!Array.isArray(value.models) ||
 		value.models.length === 0 ||
 		value.models.length > EMPATRA_HOST_MAX_MODELS ||
+		(value.skills !== undefined && (!Array.isArray(value.skills) || value.skills.length > EMPATRA_HOST_MAX_SKILLS)) ||
 		!Array.isArray(value.workspaceRoots) ||
 		value.workspaceRoots.length === 0 ||
 		value.workspaceRoots.length > EMPATRA_HOST_MAX_WORKSPACE_ROOTS
@@ -969,6 +1007,10 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 	if (new Set(workspaceRoots).size !== workspaceRoots.length) {
 		throw new EmpatraHostProtocolError("invalid_request", "workspaceRoots must be unique");
 	}
+	const skills = value.skills === undefined ? [] : value.skills.map(skill);
+	if (new Set(skills.map(entry => entry.name)).size !== skills.length) {
+		throw new EmpatraHostProtocolError("invalid_request", "skill names must be unique");
+	}
 	return {
 		capability: boundedString(value.capability, "capability", 32, 512),
 		gatewayBaseUrl: gatewayBaseUrl(value.gatewayBaseUrl),
@@ -976,6 +1018,7 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 		models,
 		protocolVersion: EMPATRA_HOST_PROTOCOL_VERSION,
 		sessionDirectory: absolutePath(value.sessionDirectory, "sessionDirectory"),
+		skills,
 		type: "host_initialize",
 		workspaceRoots,
 	};

@@ -31,6 +31,15 @@ const validInitialize: EmpatraHostInitializeCommand = {
 	],
 	protocolVersion: EMPATRA_HOST_PROTOCOL_VERSION,
 	sessionDirectory: "/tmp/empatra-omp-sessions",
+	skills: [
+		{
+			baseDir: "/tmp/empatra-omp-sessions/runtime/skill-snapshots/revision/demo",
+			description: "Проверка безопасного skill snapshot",
+			filePath: "/tmp/empatra-omp-sessions/runtime/skill-snapshots/revision/demo/SKILL.md",
+			name: "demo",
+			source: "empatra:project",
+		},
+	],
 	type: "host_initialize",
 	workspaceRoots: ["/tmp/workspace"],
 };

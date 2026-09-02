@@ -9,6 +9,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import type { ExtensionUIContext } from "../../extensibility/extensions/types";
+import type { Skill } from "../../extensibility/skills";
 import type { AgentSessionEvent } from "../../session/agent-session-events";
 import { BlobStore } from "../../session/blob-store";
 import type { SessionEntry } from "../../session/session-entries";
@@ -179,6 +180,7 @@ export interface EmpatraHostSessionFactoryOptions {
 	model: Model<"openai-responses">;
 	modelRegistry: ModelRegistry;
 	scopedModels: readonly Model<"openai-responses">[];
+	skills: readonly Skill[];
 	sessionManager: SessionManager;
 	settings: Settings;
 	systemPrompt: string;
@@ -197,6 +199,7 @@ interface InitializedRuntime {
 	metadataStore: EmpatraHostThreadMetadataStore;
 	modelDefinitions: ReadonlyMap<string, EmpatraHostModel>;
 	models: ReadonlyMap<string, Model<"openai-responses">>;
+	skills: readonly Skill[];
 	policy: EmpatraHostWorkspacePolicy;
 	sessionDirectory: string;
 }
@@ -204,6 +207,38 @@ interface InitializedRuntime {
 function isInsideDirectory(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);
 	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+async function resolveMaterializedSkills(
+	entries: readonly NonNullable<EmpatraHostInitializeCommand["skills"]>[number][],
+	sessionDirectory: string,
+): Promise<readonly Skill[]> {
+	return await Promise.all(
+		entries.map(async entry => {
+			let filePath: string;
+			let baseDir: string;
+			try {
+				[filePath, baseDir] = await Promise.all([realpath(entry.filePath), realpath(entry.baseDir)]);
+				const [fileInfo, directoryInfo] = await Promise.all([lstat(filePath), lstat(baseDir)]);
+				if (!fileInfo.isFile() || !directoryInfo.isDirectory() || !isInsideDirectory(baseDir, filePath)) {
+					throw new Error("skill snapshot has invalid filesystem entries");
+				}
+			} catch {
+				throw new EmpatraHostProtocolError("invalid_request", "skill snapshot is unavailable");
+			}
+			if (!isInsideDirectory(sessionDirectory, baseDir) || !isInsideDirectory(sessionDirectory, filePath)) {
+				throw new EmpatraHostProtocolError("invalid_request", "skill snapshot escapes private session storage");
+			}
+			return {
+				baseDir,
+				description: entry.description,
+				filePath,
+				...(entry.hide === undefined ? {} : { hide: entry.hide }),
+				name: entry.name,
+				source: entry.source,
+			};
+		}),
+	);
 }
 
 async function createPrivateBlobDirectory(sessionDirectory: string): Promise<string> {
@@ -645,7 +680,7 @@ async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions):
 		sessionManager: options.sessionManager,
 		settings: options.settings,
 		skipPythonPreflight: true,
-		skills: [],
+		skills: [...options.skills],
 		slashCommands: [],
 		systemPrompt: options.systemPrompt,
 		toolNames: [],
@@ -705,6 +740,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		if (process.platform !== "win32") await chmod(agentDir, 0o700);
 		const models = new Map(command.models.map(model => [model.id, toModel(model, command.gatewayBaseUrl)]));
 		const modelDefinitions = new Map(command.models.map(model => [model.id, model]));
+		const skills = await resolveMaterializedSkills(command.skills ?? [], sessionDirectory);
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 		await authStorage.reload();
 		const settings = Settings.isolated({ "tools.approvalMode": "always-ask" }, { agentDir, cwd: policy.roots[0] });
@@ -748,6 +784,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			metadataStore,
 			modelDefinitions,
 			models,
+			skills,
 			policy,
 			sessionDirectory,
 		};
@@ -2040,6 +2077,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			model,
 			modelRegistry: runtime.modelRegistry,
 			scopedModels: [...runtime.models.values()],
+			skills: runtime.skills,
 			sessionManager,
 			settings,
 			systemPrompt,

@@ -51,7 +51,7 @@ describe("standalone Empatra OMP host entry", () => {
 						supportsTools: true,
 					},
 				],
-				protocolVersion: 4,
+				protocolVersion: 5,
 				sessionDirectory: host.sessions,
 				type: "host_initialize",
 				workspaceRoots: [host.workspace],
@@ -73,7 +73,7 @@ describe("standalone Empatra OMP host entry", () => {
 			.trim()
 			.split("\n")
 			.map(frame => JSON.parse(frame));
-		expect(frames[0]).toMatchObject({ protocolVersion: 4, type: "host_ready" });
+		expect(frames[0]).toMatchObject({ protocolVersion: 5, type: "host_ready" });
 		expect(frames.find(frame => frame.id === "initialize-1")).toMatchObject({ success: true });
 		expect(frames.find(frame => frame.id === "list-1")).toMatchObject({
 			data: { nextOffset: null, threads: [] },

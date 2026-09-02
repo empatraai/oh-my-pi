@@ -37,7 +37,7 @@ function initializeCommand(): EmpatraHostInitializeCommand {
 				supportsTools: true,
 			},
 		],
-		protocolVersion: 4,
+		protocolVersion: 5,
 		sessionDirectory: "/tmp/empatra-omp-sessions",
 		type: "host_initialize",
 		workspaceRoots: ["/tmp/workspace"],
@@ -385,7 +385,7 @@ describe("Empatra host protocol server", () => {
 		});
 
 		const frames = output.map(frame => JSON.parse(frame));
-		expect(frames[0]).toMatchObject({ protocolVersion: 4, type: "host_ready" });
+		expect(frames[0]).toMatchObject({ protocolVersion: 5, type: "host_ready" });
 		expect(frames.find(frame => frame.id === "list-before-init")).toMatchObject({
 			code: "not_initialized",
 			success: false,
