@@ -435,14 +435,16 @@ await new Promise(() => {});`,
 		});
 
 		await writeFile(extensionPath, "export default () => 'changed';\n", "utf8");
-		await expect(runtime.startThread({
-			cwd: host.workspace,
-			id: "create-revoked-session",
-			modelId: "managed-model",
-			operationId: "operation-revoked-session",
-			systemPrompt: "Empatra system prompt",
-			type: "thread_create",
-		})).rejects.toMatchObject({ code: "invalid_request" });
+		await expect(
+			runtime.startThread({
+				cwd: host.workspace,
+				id: "create-revoked-session",
+				modelId: "managed-model",
+				operationId: "operation-revoked-session",
+				systemPrompt: "Empatra system prompt",
+				type: "thread_create",
+			}),
+		).rejects.toMatchObject({ code: "invalid_request" });
 		await runtime.dispose();
 	});
 
