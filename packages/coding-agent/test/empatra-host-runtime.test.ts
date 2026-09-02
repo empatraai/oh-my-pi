@@ -1264,6 +1264,44 @@ await new Promise(() => {});`,
 		await runtime.dispose();
 	});
 
+	test("fails closed when one v2 turn cannot fit the bounded response budget", async () => {
+		const host = await temporaryHost();
+		let options: EmpatraHostSessionFactoryOptions | undefined;
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async input => {
+				options = input;
+				return new FakeSession();
+			},
+		});
+		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+		const created = (await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-v2-oversized-turn",
+			modelId: "managed-model",
+			operationId: "operation-v2-oversized-turn",
+			systemPrompt: "System",
+			type: "thread_create",
+		})) as { threadId: string };
+		if (!options) throw new Error("Expected session factory options");
+		options.sessionManager.appendMessage({
+			content: `oversized-turn:${"x".repeat(EMPATRA_HOST_THREAD_READ_TARGET_BYTES)}`,
+			role: "user",
+			timestamp: Date.now(),
+		});
+		await options.sessionManager.flush();
+
+		await expect(
+			runtime.readThread({
+				id: "read-v2-oversized-turn",
+				limit: 1,
+				pagination: "turns-v2",
+				threadId: created.threadId,
+				type: "thread_read",
+			}),
+		).rejects.toMatchObject({ code: "frame_too_large" });
+		await runtime.dispose();
+	});
+
 	test("recomputes durable usage after fork and rollback from each selected branch", async () => {
 		const host = await temporaryHost();
 		const turnCounts = new Map<string, number>();

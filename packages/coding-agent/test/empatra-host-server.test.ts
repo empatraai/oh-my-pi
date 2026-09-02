@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
 	createEmpatraHostOutboundWriter,
+	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
 	type EmpatraHostEvent,
 	type EmpatraHostInitializeCommand,
 	EmpatraHostProtocolError,
@@ -503,7 +504,11 @@ describe("Empatra host protocol server", () => {
 		});
 
 		const frames = output.map(frame => JSON.parse(frame));
-		expect(frames[0]).toMatchObject({ protocolVersion: 6, type: "host_ready" });
+		expect(frames[0]).toMatchObject({
+			capabilities: [EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY],
+			protocolVersion: 6,
+			type: "host_ready",
+		});
 		expect(frames.find(frame => frame.id === "list-before-init")).toMatchObject({
 			code: "not_initialized",
 			success: false,

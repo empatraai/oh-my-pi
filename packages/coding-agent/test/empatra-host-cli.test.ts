@@ -73,7 +73,11 @@ describe("standalone Empatra OMP host entry", () => {
 			.trim()
 			.split("\n")
 			.map(frame => JSON.parse(frame));
-		expect(frames[0]).toMatchObject({ protocolVersion: 6, type: "host_ready" });
+		expect(frames[0]).toMatchObject({
+			capabilities: ["thread_read.turns-v2"],
+			protocolVersion: 6,
+			type: "host_ready",
+		});
 		expect(frames.find(frame => frame.id === "initialize-1")).toMatchObject({ success: true });
 		expect(frames.find(frame => frame.id === "list-1")).toMatchObject({
 			data: { nextOffset: null, threads: [] },

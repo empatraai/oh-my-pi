@@ -27,6 +27,14 @@ export const EMPATRA_HOST_MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
 export const EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES = 512 * 1024;
 export const EMPATRA_HOST_MAX_PLAN_SUMMARY_BYTES = 4 * 1024;
 export const EMPATRA_HOST_THREAD_READ_TARGET_BYTES = 896 * 1024;
+/**
+ * Capability advertised by protocol v6 hosts that implement the bounded,
+ * turn-aligned history contract. Keep the version in the capability name so
+ * a controller can fail closed when a future pagination shape is introduced.
+ */
+export const EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY = "thread_read.turns-v2" as const;
+export const EMPATRA_HOST_CAPABILITIES = [EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY] as const;
+export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
 
 const textEncoder = new TextEncoder();
 const CONTROL_CHARACTER = /\p{Cc}/u;
@@ -443,6 +451,7 @@ export type EmpatraHostCommand =
 	| EmpatraHostTurnStartCommand;
 
 export interface EmpatraHostReadyFrame {
+	capabilities: readonly EmpatraHostCapability[];
 	maxFrameBytes: number;
 	protocolVersion: typeof EMPATRA_HOST_PROTOCOL_VERSION;
 	type: "host_ready";

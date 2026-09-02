@@ -2,6 +2,7 @@ import { LineTooLongError, readLines } from "@oh-my-pi/pi-utils";
 
 import { EmpatraHostProtocolError } from "./errors";
 import {
+	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
 	EMPATRA_HOST_PROTOCOL_VERSION,
 	type EmpatraHostCommand,
@@ -314,6 +315,7 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 
 	await writeSerialized(
 		serializeEmpatraHostFrame({
+			capabilities: EMPATRA_HOST_CAPABILITIES,
 			maxFrameBytes: EMPATRA_HOST_MAX_FRAME_BYTES,
 			protocolVersion: EMPATRA_HOST_PROTOCOL_VERSION,
 			type: "host_ready",

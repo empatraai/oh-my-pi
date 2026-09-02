@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
 	computeEmpatraHostToolCatalogRevision,
+	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
 	EMPATRA_HOST_MAX_HOST_TOOL_RESULT_BYTES,
 	EMPATRA_HOST_MAX_IMAGE_BYTES,
@@ -525,6 +526,7 @@ describe("Empatra host protocol", () => {
 		);
 		expect(
 			serializeEmpatraHostFrame({
+				capabilities: EMPATRA_HOST_CAPABILITIES,
 				maxFrameBytes: EMPATRA_HOST_MAX_FRAME_BYTES,
 				protocolVersion: EMPATRA_HOST_PROTOCOL_VERSION,
 				type: "host_ready",
