@@ -4,6 +4,14 @@ import type {
 	EmpatraHostInitializeCommand,
 	EmpatraHostToolOutboundFrame,
 } from "./protocol";
+import { EMPATRA_HOST_CAPABILITIES } from "./protocol";
+import type {
+	EmpatraHostSubagentCloseCommand,
+	EmpatraHostSubagentInterruptCommand,
+	EmpatraHostSubagentListCommand,
+	EmpatraHostSubagentSpawnCommand,
+	EmpatraHostSubagentSteerCommand,
+} from "./subagent-broker";
 import type { EmpatraHostRuntime } from "./server";
 
 type RuntimeFactory = () => Promise<EmpatraHostRuntime>;
@@ -27,6 +35,40 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 
 	constructor(runtimeFactory: RuntimeFactory = loadEmpatraHostRuntime) {
 		this.#runtimeFactory = runtimeFactory;
+	}
+
+	getAdvertisedCapabilities() {
+		return this.#runtime?.getAdvertisedCapabilities?.() ?? EMPATRA_HOST_CAPABILITIES;
+	}
+
+	spawnSubagent(command: EmpatraHostSubagentSpawnCommand): Promise<unknown> {
+		const runtime = this.#requireRuntime();
+		if (!runtime.spawnSubagent) return Promise.reject(new Error("Subagent lifecycle is unavailable"));
+		return runtime.spawnSubagent(command);
+	}
+
+	steerSubagent(command: EmpatraHostSubagentSteerCommand): Promise<unknown> {
+		const runtime = this.#requireRuntime();
+		if (!runtime.steerSubagent) return Promise.reject(new Error("Subagent lifecycle is unavailable"));
+		return runtime.steerSubagent(command);
+	}
+
+	interruptSubagent(command: EmpatraHostSubagentInterruptCommand): Promise<unknown> {
+		const runtime = this.#requireRuntime();
+		if (!runtime.interruptSubagent) return Promise.reject(new Error("Subagent lifecycle is unavailable"));
+		return runtime.interruptSubagent(command);
+	}
+
+	closeSubagent(command: EmpatraHostSubagentCloseCommand): Promise<unknown> {
+		const runtime = this.#requireRuntime();
+		if (!runtime.closeSubagent) return Promise.reject(new Error("Subagent lifecycle is unavailable"));
+		return runtime.closeSubagent(command);
+	}
+
+	listSubagents(command: EmpatraHostSubagentListCommand): Promise<unknown> {
+		const runtime = this.#requireRuntime();
+		if (!runtime.listSubagents) return Promise.reject(new Error("Subagent lifecycle is unavailable"));
+		return runtime.listSubagents(command);
 	}
 
 	async #load(): Promise<EmpatraHostRuntime> {

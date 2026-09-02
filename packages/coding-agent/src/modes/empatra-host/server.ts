@@ -7,14 +7,30 @@ import {
 	EMPATRA_HOST_PROTOCOL_VERSION,
 	type EmpatraHostCommand,
 	type EmpatraHostEvent,
+	type EmpatraHostAdvertisedCapability,
 	type EmpatraHostInitializeCommand,
 	type EmpatraHostToolOutboundFrame,
 	parseEmpatraHostCommand,
 	projectEmpatraHostFailure,
 	serializeEmpatraHostFrame,
 } from "./protocol";
+import type {
+	EmpatraHostSubagentCloseCommand,
+	EmpatraHostSubagentInterruptCommand,
+	EmpatraHostSubagentListCommand,
+	EmpatraHostSubagentSpawnCommand,
+	EmpatraHostSubagentSteerCommand,
+} from "./subagent-broker";
+import { EMPATRA_HOST_SUBAGENT_CAPABILITY } from "./subagent-broker";
 
 export interface EmpatraHostRuntime {
+	/** Advertises only capabilities backed by injected main-owned controllers. */
+	getAdvertisedCapabilities?(): readonly EmpatraHostAdvertisedCapability[];
+	spawnSubagent?(command: EmpatraHostSubagentSpawnCommand): Promise<unknown>;
+	steerSubagent?(command: EmpatraHostSubagentSteerCommand): Promise<unknown>;
+	interruptSubagent?(command: EmpatraHostSubagentInterruptCommand): Promise<unknown>;
+	closeSubagent?(command: EmpatraHostSubagentCloseCommand): Promise<unknown>;
+	listSubagents?(command: EmpatraHostSubagentListCommand): Promise<unknown>;
 	/** Resolves a main-owned image request; optional for hosts that do not advertise the capability. */
 	resolveImageGeneration?(
 		command: Extract<EmpatraHostCommand, { type: "image_generation_response" }>,
@@ -189,6 +205,7 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 	let initialized = false;
 	let stopped = false;
 	const writeSerialized = createEmpatraHostOutboundWriter(options.write);
+	const advertisedCapabilities = options.runtime.getAdvertisedCapabilities?.() ?? EMPATRA_HOST_CAPABILITIES;
 	const writeError = (id: string | null, error: unknown) => {
 		const failure = projectEmpatraHostFailure(error);
 		return writeSerialized(
@@ -322,12 +339,42 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 				return options.runtime.interruptTurn(command);
 			case "turn_steer":
 				return options.runtime.steerTurn(command);
+			case "subagent_spawn":
+				if (!advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY))
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle was not negotiated by the main host");
+				if (!options.runtime.spawnSubagent)
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle is not wired by the main host");
+				return options.runtime.spawnSubagent(command);
+			case "subagent_steer":
+				if (!advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY))
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle was not negotiated by the main host");
+				if (!options.runtime.steerSubagent)
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle is not wired by the main host");
+				return options.runtime.steerSubagent(command);
+			case "subagent_interrupt":
+				if (!advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY))
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle was not negotiated by the main host");
+				if (!options.runtime.interruptSubagent)
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle is not wired by the main host");
+				return options.runtime.interruptSubagent(command);
+			case "subagent_close":
+				if (!advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY))
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle was not negotiated by the main host");
+				if (!options.runtime.closeSubagent)
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle is not wired by the main host");
+				return options.runtime.closeSubagent(command);
+			case "subagent_list":
+				if (!advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY))
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle was not negotiated by the main host");
+				if (!options.runtime.listSubagents)
+					throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle is not wired by the main host");
+				return options.runtime.listSubagents(command);
 		}
 	};
 
 	await writeSerialized(
 		serializeEmpatraHostFrame({
-			capabilities: EMPATRA_HOST_CAPABILITIES,
+			capabilities: advertisedCapabilities,
 			maxFrameBytes: EMPATRA_HOST_MAX_FRAME_BYTES,
 			protocolVersion: EMPATRA_HOST_PROTOCOL_VERSION,
 			type: "host_ready",

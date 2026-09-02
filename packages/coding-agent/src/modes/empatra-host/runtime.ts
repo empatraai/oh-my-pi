@@ -75,6 +75,7 @@ import type {
 	EmpatraHostTurnSummary,
 } from "./protocol";
 import {
+	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_MAX_ASSISTANT_MESSAGES_PER_TURN,
 	EMPATRA_HOST_MAX_CONTENT_INDEX,
 	EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES,
@@ -82,6 +83,15 @@ import {
 	projectEmpatraHostFailure,
 } from "./protocol";
 import type { EmpatraHostRuntime } from "./server";
+import {
+	EMPATRA_HOST_SUBAGENT_CAPABILITY,
+	EmpatraHostSubagentController,
+	type EmpatraHostSubagentCloseCommand,
+	type EmpatraHostSubagentInterruptCommand,
+	type EmpatraHostSubagentListCommand,
+	type EmpatraHostSubagentSpawnCommand,
+	type EmpatraHostSubagentSteerCommand,
+} from "./subagent-broker";
 import { type EmpatraHostThreadMetadata, EmpatraHostThreadMetadataStore } from "./thread-metadata-store";
 import { type EmpatraHostProjectedMessage, projectThreadMessages } from "./thread-projection";
 import { EmpatraHostThreadRegistry } from "./thread-registry";
@@ -924,6 +934,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	readonly #handles = new Set<ThreadHandle>();
 	readonly #registry: EmpatraHostThreadRegistry<ThreadHandle>;
 	readonly #sessionFactory: EmpatraHostSessionFactory;
+	readonly #subagentController?: EmpatraHostSubagentController;
 	#disposing = false;
 	#eventSink: (event: EmpatraHostEvent) => Promise<void> = async () => {
 		throw new EmpatraHostProtocolError("event_sink_missing", "Empatra host event sink is not connected");
@@ -936,13 +947,51 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	readonly #pendingPlanResolutions = new Map<string, PendingPlanResolution>();
 	#hostToolCatalog?: Readonly<{ revision: string; tools: readonly EmpatraHostToolDefinition[] }>;
 
-	constructor(options: { maxResidentThreads?: number; sessionFactory?: EmpatraHostSessionFactory } = {}) {
+	constructor(
+		options: {
+			maxResidentThreads?: number;
+			sessionFactory?: EmpatraHostSessionFactory;
+			subagentController?: EmpatraHostSubagentController;
+		} = {},
+	) {
 		this.#registry = new EmpatraHostThreadRegistry(options.maxResidentThreads);
 		this.#sessionFactory = options.sessionFactory ?? defaultSessionFactory;
+		this.#subagentController = options.subagentController;
 		this.#hostToolsConnection = new EmpatraHostToolsConnection();
 		this.#interactionBroker = new EmpatraHostInteractionBroker({
 			emitRequest: request => this.#emitInteractionRequest(request),
 		});
+	}
+
+	getAdvertisedCapabilities() {
+		return this.#subagentController
+			? [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY]
+			: EMPATRA_HOST_CAPABILITIES;
+	}
+
+	spawnSubagent(command: EmpatraHostSubagentSpawnCommand): Promise<unknown> {
+		this.#requireSubagentParent(command);
+		return this.#requireSubagentController().spawn(command);
+	}
+
+	steerSubagent(command: EmpatraHostSubagentSteerCommand): Promise<unknown> {
+		this.#requireSubagentParent(command);
+		return this.#requireSubagentController().steer(command, command.childId, command.message);
+	}
+
+	interruptSubagent(command: EmpatraHostSubagentInterruptCommand): Promise<unknown> {
+		this.#requireSubagentParent(command);
+		return this.#requireSubagentController().interrupt(command, command.childId);
+	}
+
+	closeSubagent(command: EmpatraHostSubagentCloseCommand): Promise<unknown> {
+		this.#requireSubagentParent(command);
+		return this.#requireSubagentController().close(command, command.childId);
+	}
+
+	listSubagents(command: EmpatraHostSubagentListCommand): Promise<unknown> {
+		this.#requireSubagentParent(command);
+		return this.#requireSubagentController().list(command);
 	}
 
 	/**
@@ -1970,6 +2019,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 
 	async dispose(): Promise<void> {
 		this.#disposing = true;
+		await this.#subagentController?.dispose();
 		this.#threadReadProjectionCache.clear();
 		this.#interactionBroker.dispose();
 		for (const pending of this.#pendingPlanResolutions.values()) {
@@ -2338,6 +2388,30 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			throw new EmpatraHostProtocolError("stale_turn", "Interaction command does not match the active turn");
 		}
 		return handle;
+	}
+
+	#requireSubagentController(): EmpatraHostSubagentController {
+		if (!this.#subagentController) {
+			throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent lifecycle is not wired by the main host");
+		}
+		return this.#subagentController;
+	}
+
+	#requireSubagentParent(command: {
+		generation: number;
+		parentThreadId: string;
+		parentTurnId: string;
+	}): void {
+		const state = this.#registry.get(command.parentThreadId);
+		if (
+			!state ||
+			state.generation !== command.generation ||
+			state.activeTurnId !== command.parentTurnId ||
+			state.handle.activeTurn?.generation !== command.generation ||
+			state.handle.activeTurn.turnId !== command.parentTurnId
+		) {
+			throw new EmpatraHostProtocolError("stale_turn", "Subagent command does not match the active parent turn");
+		}
 	}
 
 	#assertInteractionResolution(resolution: EmpatraHostInteractionResolution): void {

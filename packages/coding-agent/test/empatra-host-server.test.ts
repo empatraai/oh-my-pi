@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
 	createEmpatraHostOutboundWriter,
 	EMPATRA_HOST_CAPABILITIES,
+	EMPATRA_HOST_SUBAGENT_CAPABILITY,
+	EmpatraHostSubagentController,
 	type EmpatraHostEvent,
 	type EmpatraHostInitializeCommand,
 	EmpatraHostProtocolError,
@@ -137,6 +139,60 @@ function runtime(overrides: Partial<EmpatraHostRuntime> = {}): EmpatraHostRuntim
 }
 
 describe("Empatra host protocol server", () => {
+	test("dispatches subagent lifecycle only when an injected controller advertises it", async () => {
+		const output: string[] = [];
+		let controller: EmpatraHostSubagentController | undefined;
+		const hostRuntime = runtime({
+			getAdvertisedCapabilities: () => [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY],
+			setEventSink(sink) {
+				controller = new EmpatraHostSubagentController({
+					onEvent: sink,
+					runner: {
+						run: async context => {
+							context.onProgress("OMP task running");
+							return { output: "OMP task complete", status: "completed" };
+						},
+				},
+				});
+			},
+			async spawnSubagent(command) {
+				if (!controller) throw new Error("controller was not injected");
+				return controller.spawn(command);
+			},
+			async dispose() {
+				await controller?.dispose();
+			},
+		});
+		await runEmpatraHostServer({
+			input: inputStream([
+				initializeCommand(),
+				{
+					assignment: "Проверь OMP task",
+					generation: 1,
+					id: "subagent-spawn-server",
+					parentThreadId: "thread-parent",
+					parentTurnId: "turn-parent",
+					type: "subagent_spawn",
+				},
+				{ id: "subagent-shutdown-server", type: "host_shutdown" },
+			]),
+			runtime: hostRuntime,
+			write: async frame => {
+				output.push(frame);
+			},
+		});
+		const frames = output.map(frame => JSON.parse(frame) as Record<string, unknown>);
+		expect(frames).toContainEqual(
+			expect.objectContaining({
+				capabilities: expect.arrayContaining([EMPATRA_HOST_SUBAGENT_CAPABILITY]),
+				type: "host_ready",
+			}),
+		);
+		expect(frames).toContainEqual(expect.objectContaining({ id: "subagent-spawn-server", success: true }));
+		expect(frames).toContainEqual(expect.objectContaining({ event: "subagent_progress", type: "host_event" }));
+		expect(frames).toContainEqual(expect.objectContaining({ event: "subagent_result", type: "host_event" }));
+	});
+
 	test("bounds serialized stdout while the controller is back-pressured", async () => {
 		const release = Promise.withResolvers<void>();
 		const delivered: string[] = [];

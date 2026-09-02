@@ -20,6 +20,13 @@ import {
 	parseEmpatraHostExecutionBrokerRequestEvent,
 	parseEmpatraHostExecutionBrokerResponse,
 } from "./execution-broker";
+import {
+	EMPATRA_HOST_SUBAGENT_CAPABILITY,
+	parseEmpatraHostSubagentCommand,
+	parseEmpatraHostSubagentEvent,
+	type EmpatraHostSubagentCommand,
+	type EmpatraHostSubagentEvent,
+} from "./subagent-broker";
 
 export const EMPATRA_HOST_PROTOCOL_VERSION = 6 as const;
 export const EMPATRA_HOST_MAX_FRAME_BYTES = 1024 * 1024;
@@ -87,7 +94,12 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
 ] as const;
 export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
+export type EmpatraHostAdvertisedCapability = EmpatraHostCapability | typeof EMPATRA_HOST_SUBAGENT_CAPABILITY;
 const EMPATRA_HOST_CAPABILITY_SET = new Set<string>(EMPATRA_HOST_CAPABILITIES);
+const EMPATRA_HOST_ADVERTISED_CAPABILITY_SET = new Set<string>([
+	...EMPATRA_HOST_CAPABILITIES,
+	EMPATRA_HOST_SUBAGENT_CAPABILITY,
+]);
 
 const textEncoder = new TextEncoder();
 const CONTROL_CHARACTER = /\p{Cc}/u;
@@ -519,10 +531,11 @@ export type EmpatraHostCommand =
 	| EmpatraHostThreadUnarchiveCommand
 	| EmpatraHostTurnInterruptCommand
 	| EmpatraHostTurnSteerCommand
-	| EmpatraHostTurnStartCommand;
+	| EmpatraHostTurnStartCommand
+	| EmpatraHostSubagentCommand;
 
 export interface EmpatraHostReadyFrame {
-	capabilities: readonly EmpatraHostCapability[];
+	capabilities: readonly EmpatraHostAdvertisedCapability[];
 	maxFrameBytes: number;
 	protocolVersion: typeof EMPATRA_HOST_PROTOCOL_VERSION;
 	type: "host_ready";
@@ -690,7 +703,8 @@ export type EmpatraHostEvent =
 	| EmpatraHostToolExecutionUpdateEvent
 	| EmpatraHostTurnCompletedEvent
 	| EmpatraHostTurnOutputEvent
-	| EmpatraHostTurnUsageUpdatedEvent;
+	| EmpatraHostTurnUsageUpdatedEvent
+	| EmpatraHostSubagentEvent;
 
 export interface EmpatraHostSuccessResponse {
 	data?: unknown;
@@ -810,16 +824,23 @@ export function parseEmpatraHostCapability(value: unknown): EmpatraHostCapabilit
 	return value as EmpatraHostCapability;
 }
 
+function parseEmpatraHostAdvertisedCapability(value: unknown): EmpatraHostAdvertisedCapability {
+	if (typeof value !== "string" || !EMPATRA_HOST_ADVERTISED_CAPABILITY_SET.has(value)) {
+		throw new EmpatraHostProtocolError("invalid_request", "host capability is invalid");
+	}
+	return value as EmpatraHostAdvertisedCapability;
+}
+
 /**
  * Validate the capability list advertised by `host_ready`.  Subsets are
  * allowed so a host can expose only the contracts it actually wired, while
  * unknown names and duplicate claims fail closed.
  */
-export function parseEmpatraHostCapabilities(value: unknown): readonly EmpatraHostCapability[] {
-	if (!Array.isArray(value) || value.length > EMPATRA_HOST_CAPABILITIES.length) {
+export function parseEmpatraHostCapabilities(value: unknown): readonly EmpatraHostAdvertisedCapability[] {
+	if (!Array.isArray(value) || value.length > EMPATRA_HOST_CAPABILITIES.length + 1) {
 		throw new EmpatraHostProtocolError("invalid_request", "host capabilities are invalid");
 	}
-	const capabilities = value.map(parseEmpatraHostCapability);
+	const capabilities = value.map(parseEmpatraHostAdvertisedCapability);
 	if (new Set(capabilities).size !== capabilities.length) {
 		throw new EmpatraHostProtocolError("invalid_request", "host capabilities must be unique");
 	}
@@ -1278,6 +1299,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 		throw new EmpatraHostProtocolError("invalid_request", "Host command must be an object with a type");
 	}
 	if (parsed.type === "host_initialize") return parseInitialize(parsed);
+	if (parsed.type.startsWith("subagent_")) return parseEmpatraHostSubagentCommand(parsed);
 	const id = identifier(parsed.id, "id");
 
 	switch (parsed.type) {
@@ -1791,6 +1813,12 @@ export function serializeEmpatraHostFrame(
 	}
 	if (frame.type === "host_event" && frame.event === "image_generation") {
 		parseEmpatraHostImageGenerationEvent(frame);
+	}
+	if (
+		frame.type === "host_event" &&
+		(frame.event === "subagent_lifecycle" || frame.event === "subagent_progress" || frame.event === "subagent_result")
+	) {
+		parseEmpatraHostSubagentEvent(frame);
 	}
 	if (frame.type === "host_event" && frame.event === "plan_proposal") {
 		interactionDigest(frame.digest);

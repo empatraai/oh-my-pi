@@ -41,13 +41,15 @@ describe("Empatra host subagent broker seam", () => {
 		expect(parseEmpatraHostSubagentCommand(spawn)).toEqual(spawn);
 		expect(
 			parseEmpatraHostSubagentEvent({
-				...scope,
 				agentName: "scout.readonly",
 				childId: "child-1",
 				event: "subagent_lifecycle",
+				generation: scope.generation,
 				index: 0,
 				sequence: 1,
 				status: "running",
+				threadId: scope.parentThreadId,
+				turnId: scope.parentTurnId,
 				type: "host_event",
 			}),
 		).toMatchObject({ childId: "child-1", event: "subagent_lifecycle", status: "running" });
@@ -147,9 +149,11 @@ describe("Empatra host subagent broker seam", () => {
 		]);
 		const events: EmpatraHostSubagentEvent[] = [];
 		const event = {
-			...scope,
 			childId: started.childId,
 			event: "subagent_progress" as const,
+			generation: scope.generation,
+			threadId: scope.parentThreadId,
+			turnId: scope.parentTurnId,
 			progress: "Проверка продолжается",
 			sequence: 4,
 			status: "running" as const,
@@ -162,6 +166,7 @@ describe("Empatra host subagent broker seam", () => {
 		});
 		transport.handleEvent(event);
 		expect(events).toEqual([event]);
+		expect(events[0]).not.toBe(event);
 		transport.dispose();
 	});
 });

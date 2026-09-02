@@ -102,32 +102,41 @@ export interface EmpatraHostSubagentResponse {
 	type: "subagent_response";
 }
 
-export interface EmpatraHostSubagentLifecycleEvent extends EmpatraHostSubagentScope {
+export interface EmpatraHostSubagentLifecycleEvent {
 	agentName: string;
 	childId: string;
 	event: "subagent_lifecycle";
+	generation: number;
 	index: number;
 	sequence: number;
 	status: EmpatraHostSubagentLifecycleStatus;
+	threadId: string;
+	turnId: string;
 	type: "host_event";
 }
 
-export interface EmpatraHostSubagentProgressEvent extends EmpatraHostSubagentScope {
+export interface EmpatraHostSubagentProgressEvent {
 	childId: string;
 	event: "subagent_progress";
+	generation: number;
 	progress: string;
 	sequence: number;
 	status: "running";
+	threadId: string;
+	turnId: string;
 	type: "host_event";
 }
 
-export interface EmpatraHostSubagentResultEvent extends EmpatraHostSubagentScope {
+export interface EmpatraHostSubagentResultEvent {
 	childId: string;
 	event: "subagent_result";
+	generation: number;
 	output: string;
 	outputTruncated: boolean;
 	sequence: number;
 	status: Exclude<EmpatraHostSubagentLifecycleStatus, "running">;
+	threadId: string;
+	turnId: string;
 	type: "host_event";
 }
 
@@ -176,6 +185,14 @@ function scope(value: Record<string, unknown>): EmpatraHostSubagentScope {
 		generation: boundedInteger(value.generation, "generation", 1, Number.MAX_SAFE_INTEGER),
 		parentThreadId: boundedString(value.parentThreadId, "parentThreadId", 256),
 		parentTurnId: boundedString(value.parentTurnId, "parentTurnId", 256),
+	};
+}
+
+function eventScope(value: Record<string, unknown>): Pick<EmpatraHostSubagentLifecycleEvent, "generation" | "threadId" | "turnId"> {
+	return {
+		generation: boundedInteger(value.generation, "generation", 1, Number.MAX_SAFE_INTEGER),
+		threadId: boundedString(value.threadId, "threadId", 256),
+		turnId: boundedString(value.turnId, "turnId", 256),
 	};
 }
 
@@ -365,7 +382,7 @@ export function parseEmpatraHostSubagentEvent(value: unknown): EmpatraHostSubage
 	if (!isRecord(value) || value.type !== "host_event" || typeof value.event !== "string") {
 		throw new EmpatraHostProtocolError("subagent_event_invalid", "subagent event is invalid");
 	}
-	const base = scope(value);
+	const base = eventScope(value);
 	const sequence = boundedInteger(value.sequence, "sequence", 1, Number.MAX_SAFE_INTEGER);
 	const childId = identifier(value.childId, "childId");
 	if (value.event === "subagent_lifecycle") {
@@ -376,8 +393,8 @@ export function parseEmpatraHostSubagentEvent(value: unknown): EmpatraHostSubage
 				"event",
 				"generation",
 				"index",
-				"parentThreadId",
-				"parentTurnId",
+				"threadId",
+				"turnId",
 				"sequence",
 				"status",
 				"type",
@@ -403,8 +420,8 @@ export function parseEmpatraHostSubagentEvent(value: unknown): EmpatraHostSubage
 				"childId",
 				"event",
 				"generation",
-				"parentThreadId",
-				"parentTurnId",
+				"threadId",
+				"turnId",
 				"progress",
 				"sequence",
 				"status",
@@ -432,8 +449,8 @@ export function parseEmpatraHostSubagentEvent(value: unknown): EmpatraHostSubage
 				"generation",
 				"output",
 				"outputTruncated",
-				"parentThreadId",
-				"parentTurnId",
+				"threadId",
+				"turnId",
 				"sequence",
 				"status",
 				"type",
@@ -476,6 +493,335 @@ export interface EmpatraHostSubagentBroker {
 		request: Readonly<Pick<EmpatraHostSubagentSpawnCommand, "agentName" | "assignment" | "modelId">>,
 	): Promise<EmpatraHostSubagentSpawnResult>;
 	steer(scope: EmpatraHostSubagentScope, childId: string, message: string): Promise<void>;
+}
+
+export interface EmpatraHostSubagentRunContext {
+	readonly agentName: string;
+	readonly assignment: string;
+	readonly childId: string;
+	readonly modelId?: string;
+	readonly parentThreadId: string;
+	readonly parentTurnId: string;
+	readonly signal: AbortSignal;
+	onProgress(progress: string): void;
+}
+
+export interface EmpatraHostSubagentRunResult {
+	output: string;
+	status: Exclude<EmpatraHostSubagentLifecycleStatus, "running">;
+}
+
+/**
+ * The only execution authority accepted by the host controller.  The runner
+ * is injected by Electron main, where model selection, approval, workspace
+ * inheritance, and task recursion policy are already owned.  It deliberately
+ * has no cwd, environment, executable, or session-file fields.
+ */
+export interface EmpatraHostSubagentRunner {
+	close?(childId: string): Promise<void>;
+	interrupt?(childId: string): Promise<void>;
+	run(context: EmpatraHostSubagentRunContext): Promise<EmpatraHostSubagentRunResult>;
+	steer?(childId: string, message: string): Promise<void>;
+}
+
+export interface EmpatraHostSubagentControllerOptions {
+	onEvent?: (event: EmpatraHostSubagentEvent) => Promise<void> | void;
+	runner: EmpatraHostSubagentRunner;
+	maxPerParent?: number;
+	maxTotal?: number;
+}
+
+interface ActiveSubagent {
+	abortController: AbortController;
+	agentName: string;
+	assignment: string;
+	childId: string;
+	generation: number;
+	index: number;
+	modelId?: string;
+	parentThreadId: string;
+	parentTurnId: string;
+	runPromise: Promise<void>;
+	updatedAtMs: number;
+}
+
+function subagentScopeKey(scope: EmpatraHostSubagentScope): string {
+	return `${scope.parentThreadId}\u0000${scope.parentTurnId}\u0000${scope.generation}`;
+}
+
+function truncateUtf8(value: string, maxBytes: number): { text: string; truncated: boolean } {
+	if (textEncoder.encode(value).byteLength <= maxBytes) return { text: value, truncated: false };
+	let bytes = 0;
+	let text = "";
+	for (const character of value) {
+		const characterBytes = textEncoder.encode(character).byteLength;
+		if (bytes + characterBytes > maxBytes) break;
+		bytes += characterBytes;
+		text += character;
+	}
+	return { text, truncated: true };
+}
+
+function projectSubagentText(value: string, maxBytes: number): { text: string; truncated: boolean } {
+	const safe = [...value]
+		.map(character => {
+			const codePoint = character.codePointAt(0) ?? 0;
+			return codePoint < 32 && character !== "\n" && character !== "\r" && character !== "\t" ? "�" : character;
+		})
+		.join("");
+	return truncateUtf8(safe, maxBytes);
+}
+
+/**
+ * Main-owned bounded lifecycle controller for OMP task/subagent execution.
+ *
+ * This adapter is intentionally independent of the model-facing `TaskTool`:
+ * OMP's task executor is injected as a runner so the host can expose only the
+ * lifecycle/progress/result projection after Electron has granted the
+ * capability.  Generation fencing and per-parent limits prevent stale turns
+ * and unbounded fan-out from becoming a second source of truth.
+ */
+export class EmpatraHostSubagentController implements EmpatraHostSubagentBroker {
+	readonly capability = EMPATRA_HOST_SUBAGENT_CAPABILITY;
+	readonly #children = new Map<string, ActiveSubagent>();
+	readonly #latestGenerations = new Map<string, number>();
+	readonly #nextIndexes = new Map<string, number>();
+	readonly #onEvent: (event: EmpatraHostSubagentEvent) => Promise<void> | void;
+	readonly #runner: EmpatraHostSubagentRunner;
+	readonly #maxPerParent: number;
+	readonly #maxTotal: number;
+	#disposed = false;
+
+	constructor(options: EmpatraHostSubagentControllerOptions) {
+		const maxPerParent = options.maxPerParent ?? EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN;
+		const maxTotal = options.maxTotal ?? EMPATRA_HOST_MAX_SUBAGENT_SNAPSHOTS;
+		if (!Number.isSafeInteger(maxPerParent) || maxPerParent < 1 || maxPerParent > EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN) {
+			throw new RangeError("maxPerParent must be between 1 and 16");
+		}
+		if (!Number.isSafeInteger(maxTotal) || maxTotal < maxPerParent || maxTotal > EMPATRA_HOST_MAX_SUBAGENT_SNAPSHOTS) {
+			throw new RangeError("maxTotal must be between maxPerParent and 256");
+		}
+		this.#maxPerParent = maxPerParent;
+		this.#maxTotal = maxTotal;
+		this.#onEvent = options.onEvent ?? (() => undefined);
+		this.#runner = options.runner;
+	}
+
+	get isDisposed(): boolean {
+		return this.#disposed;
+	}
+
+	async spawn(
+		command: EmpatraHostSubagentSpawnCommand,
+	): Promise<EmpatraHostSubagentSpawnResult> {
+		this.#assertAvailable();
+		this.#advanceGeneration(command);
+		const parentKey = subagentScopeKey(command);
+		const count = [...this.#children.values()].filter(child => subagentScopeKey(child) === parentKey).length;
+		if (count >= this.#maxPerParent || this.#children.size >= this.#maxTotal) {
+			throw new EmpatraHostProtocolError("subagent_capacity_exceeded", "Subagent capacity is exhausted");
+		}
+		const index = this.#nextIndexes.get(parentKey) ?? 0;
+		if (index >= EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN) {
+			throw new EmpatraHostProtocolError("subagent_capacity_exceeded", "Subagent generation limit is exhausted");
+		}
+		this.#nextIndexes.set(parentKey, index + 1);
+		const child: ActiveSubagent = {
+			abortController: new AbortController(),
+			agentName: command.agentName ?? "task",
+			assignment: command.assignment,
+			childId: `subagent-${randomUUID()}`,
+			generation: command.generation,
+			index,
+			...(command.modelId === undefined ? {} : { modelId: command.modelId }),
+			parentThreadId: command.parentThreadId,
+			parentTurnId: command.parentTurnId,
+			runPromise: Promise.resolve(),
+			updatedAtMs: Date.now(),
+		};
+		this.#children.set(child.childId, child);
+		this.#emitLifecycle(child, "running");
+		child.runPromise = this.#runChild(child);
+		return { childId: child.childId, index, status: "running" };
+	}
+
+	async list(scope: EmpatraHostSubagentScope): Promise<EmpatraHostSubagentListResult> {
+		this.#assertAvailable();
+		this.#advanceGeneration(scope);
+		return {
+			subagents: [...this.#children.values()]
+				.filter(child => subagentScopeKey(child) === subagentScopeKey(scope))
+				.map(child => this.#snapshot(child)),
+		};
+	}
+
+	async steer(scope: EmpatraHostSubagentScope, childId: string, message: string): Promise<void> {
+		this.#assertAvailable();
+		this.#advanceGeneration(scope);
+		const child = this.#requireChild(scope, childId);
+		if (!this.#runner.steer) {
+			throw new EmpatraHostProtocolError("subagent_steer_unavailable", "Subagent steering is not wired by the main runner");
+		}
+		await this.#runner.steer(child.childId, message);
+		child.updatedAtMs = Date.now();
+	}
+
+	async interrupt(scope: EmpatraHostSubagentScope, childId: string): Promise<void> {
+		this.#assertAvailable();
+		this.#advanceGeneration(scope);
+		const child = this.#requireChild(scope, childId);
+		child.abortController.abort();
+		if (this.#runner.interrupt) await this.#runner.interrupt(child.childId);
+		child.updatedAtMs = Date.now();
+	}
+
+	async close(scope: EmpatraHostSubagentScope, childId: string): Promise<void> {
+		this.#assertAvailable();
+		this.#advanceGeneration(scope);
+		const child = this.#requireChild(scope, childId);
+		child.abortController.abort();
+		if (this.#runner.close) await this.#runner.close(child.childId);
+		child.updatedAtMs = Date.now();
+	}
+
+	async dispose(): Promise<void> {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		const children = [...this.#children.values()];
+		for (const child of children) {
+			child.abortController.abort();
+			if (this.#runner.close) await this.#runner.close(child.childId).catch(() => undefined);
+		}
+		await Promise.allSettled(children.map(child => child.runPromise));
+		this.#children.clear();
+		this.#latestGenerations.clear();
+		this.#nextIndexes.clear();
+	}
+
+	#assertAvailable(): void {
+		if (this.#disposed) throw new EmpatraHostProtocolError("subagent_disposed", "OMP subagent controller is disposed");
+	}
+
+	#advanceGeneration(scope: EmpatraHostSubagentScope): void {
+		const previous = this.#latestGenerations.get(scope.parentThreadId);
+		if (previous !== undefined && scope.generation < previous) {
+			throw new EmpatraHostProtocolError("stale_turn", "Subagent command targets an older parent generation");
+		}
+		if (previous === undefined || scope.generation > previous) {
+			this.#latestGenerations.set(scope.parentThreadId, scope.generation);
+			for (const child of this.#children.values()) {
+				if (child.parentThreadId === scope.parentThreadId && child.generation < scope.generation) child.abortController.abort();
+			}
+		}
+	}
+
+	#requireChild(scope: EmpatraHostSubagentScope, childId: string): ActiveSubagent {
+		const child = this.#children.get(childId);
+		if (
+			!child ||
+			child.parentThreadId !== scope.parentThreadId ||
+			child.parentTurnId !== scope.parentTurnId ||
+			child.generation !== scope.generation
+		) {
+			throw new EmpatraHostProtocolError("subagent_not_found", "Subagent is not active in the requested parent turn");
+		}
+		return child;
+	}
+
+	#snapshot(child: ActiveSubagent): EmpatraHostSubagentSnapshot {
+		return {
+			agentName: child.agentName,
+			childId: child.childId,
+			generation: child.generation,
+			index: child.index,
+			parentThreadId: child.parentThreadId,
+			parentTurnId: child.parentTurnId,
+			status: "running",
+			updatedAtMs: child.updatedAtMs,
+		};
+	}
+
+	#emit(event: EmpatraHostSubagentEvent): void {
+		void Promise.resolve(this.#onEvent(event)).catch(() => undefined);
+	}
+
+	#nextSequence(child: ActiveSubagent): number {
+		const key = subagentScopeKey(child);
+		const next = this.#nextIndexes.get(`${key}\u0000events`) ?? 0;
+		this.#nextIndexes.set(`${key}\u0000events`, next + 1);
+		return next + 1;
+	}
+
+	#emitLifecycle(child: ActiveSubagent, status: EmpatraHostSubagentLifecycleStatus): void {
+		this.#emit({
+			agentName: child.agentName,
+			childId: child.childId,
+			event: "subagent_lifecycle",
+			generation: child.generation,
+			index: child.index,
+			threadId: child.parentThreadId,
+			turnId: child.parentTurnId,
+			sequence: this.#nextSequence(child),
+			status,
+			type: "host_event",
+		});
+	}
+
+	#runChild(child: ActiveSubagent): Promise<void> {
+		return (async () => {
+			let outcome: EmpatraHostSubagentRunResult;
+			try {
+				outcome = await this.#runner.run({
+					agentName: child.agentName,
+					assignment: child.assignment,
+					childId: child.childId,
+					...(child.modelId === undefined ? {} : { modelId: child.modelId }),
+					parentThreadId: child.parentThreadId,
+					parentTurnId: child.parentTurnId,
+					signal: child.abortController.signal,
+					onProgress: progress => {
+						child.updatedAtMs = Date.now();
+						const projection = projectSubagentText(progress, EMPATRA_HOST_MAX_SUBAGENT_PROGRESS_BYTES);
+						this.#emit({
+							childId: child.childId,
+							event: "subagent_progress",
+							generation: child.generation,
+							threadId: child.parentThreadId,
+							turnId: child.parentTurnId,
+							progress: projection.text,
+							sequence: this.#nextSequence(child),
+							status: "running",
+							type: "host_event",
+						});
+					},
+				});
+			} catch {
+				outcome = { output: "", status: child.abortController.signal.aborted ? "aborted" : "failed" };
+			}
+			if (
+				typeof outcome.output !== "string" ||
+				(outcome.status !== "completed" && outcome.status !== "failed" && outcome.status !== "aborted")
+			) {
+				outcome = { output: "", status: child.abortController.signal.aborted ? "aborted" : "failed" };
+			}
+			const status = child.abortController.signal.aborted ? "aborted" : outcome.status;
+			const projection = projectSubagentText(outcome.output, EMPATRA_HOST_MAX_SUBAGENT_RESULT_BYTES);
+			this.#emit({
+				childId: child.childId,
+				event: "subagent_result",
+				generation: child.generation,
+				output: projection.text,
+				outputTruncated: projection.truncated,
+				threadId: child.parentThreadId,
+				turnId: child.parentTurnId,
+				sequence: this.#nextSequence(child),
+				status,
+				type: "host_event",
+			});
+			this.#emitLifecycle(child, status);
+			this.#children.delete(child.childId);
+		})();
+	}
 }
 
 export function createFailClosedEmpatraHostSubagentBroker(): EmpatraHostSubagentBroker {
@@ -603,8 +949,8 @@ export function createEmpatraHostSubagentTransport(options: Readonly<{
 		broker,
 		handleEvent: event => {
 			if (disposed) return;
-			parseEmpatraHostSubagentEvent(event);
-			options.onEvent?.(event);
+			const parsed = parseEmpatraHostSubagentEvent(event);
+			options.onEvent?.(parsed);
 		},
 		handleResponse: response => {
 			if (disposed) return;
