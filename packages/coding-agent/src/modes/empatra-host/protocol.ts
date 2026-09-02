@@ -28,13 +28,32 @@ export const EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES = 512 * 1024;
 export const EMPATRA_HOST_MAX_PLAN_SUMMARY_BYTES = 4 * 1024;
 export const EMPATRA_HOST_THREAD_READ_TARGET_BYTES = 896 * 1024;
 /**
- * Capability advertised by protocol v6 hosts that implement the bounded,
- * turn-aligned history contract. Keep the version in the capability name so
- * a controller can fail closed when a future pagination shape is introduced.
+ * Versioned, product-owned contracts implemented by the isolated OMP host.
+ *
+ * Keep each version in the capability name: a controller must be able to
+ * fail closed when a future wire shape changes.  This catalog deliberately
+ * contains only contracts backed by the host's main-owned boundary.  In
+ * particular, unrestricted execution and ambient OMP extension surfaces are
+ * not capabilities of this host.
  */
+export const EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY = "thread_lifecycle.atomic-v1" as const;
+export const EMPATRA_HOST_NATIVE_PLAN_CAPABILITY = "plan.native-v1" as const;
+export const EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY = "approval.scoped-v1" as const;
+export const EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY = "host_tools.dynamic-v1" as const;
+export const EMPATRA_HOST_IMAGE_INPUT_CAPABILITY = "images.input-v1" as const;
+export const EMPATRA_HOST_THREAD_GOALS_CAPABILITY = "goals.thread-v1" as const;
 export const EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY = "thread_read.turns-v2" as const;
-export const EMPATRA_HOST_CAPABILITIES = [EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY] as const;
+export const EMPATRA_HOST_CAPABILITIES = [
+	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
+	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
+	EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
+	EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
+	EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
+	EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
+	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
+] as const;
 export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
+const EMPATRA_HOST_CAPABILITY_SET = new Set<string>(EMPATRA_HOST_CAPABILITIES);
 
 const textEncoder = new TextEncoder();
 const CONTROL_CHARACTER = /\p{Cc}/u;
@@ -722,6 +741,34 @@ export function projectEmpatraHostFailure(error: unknown, fallbackCode = "runtim
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse one host capability without accepting arbitrary controller-provided
+ * labels.  Capability names are a closed wire contract, not presentation
+ * metadata.
+ */
+export function parseEmpatraHostCapability(value: unknown): EmpatraHostCapability {
+	if (typeof value !== "string" || !EMPATRA_HOST_CAPABILITY_SET.has(value)) {
+		throw new EmpatraHostProtocolError("invalid_request", "host capability is invalid");
+	}
+	return value as EmpatraHostCapability;
+}
+
+/**
+ * Validate the capability list advertised by `host_ready`.  Subsets are
+ * allowed so a host can expose only the contracts it actually wired, while
+ * unknown names and duplicate claims fail closed.
+ */
+export function parseEmpatraHostCapabilities(value: unknown): readonly EmpatraHostCapability[] {
+	if (!Array.isArray(value) || value.length > EMPATRA_HOST_CAPABILITIES.length) {
+		throw new EmpatraHostProtocolError("invalid_request", "host capabilities are invalid");
+	}
+	const capabilities = value.map(parseEmpatraHostCapability);
+	if (new Set(capabilities).size !== capabilities.length) {
+		throw new EmpatraHostProtocolError("invalid_request", "host capabilities must be unique");
+	}
+	return capabilities;
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -1635,6 +1682,15 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 export function serializeEmpatraHostFrame(
 	frame: EmpatraHostEvent | EmpatraHostReadyFrame | EmpatraHostResponse | EmpatraHostToolOutboundFrame,
 ): string {
+	if (frame.type === "host_ready") {
+		if (
+			frame.protocolVersion !== EMPATRA_HOST_PROTOCOL_VERSION ||
+			frame.maxFrameBytes !== EMPATRA_HOST_MAX_FRAME_BYTES
+		) {
+			throw new EmpatraHostProtocolError("invalid_request", "host_ready is invalid");
+		}
+		parseEmpatraHostCapabilities(frame.capabilities);
+	}
 	if (frame.type === "host_event" && frame.event === "plan_proposal") {
 		interactionDigest(frame.digest);
 		boundedInteger(frame.generation, "generation", 1, Number.MAX_SAFE_INTEGER);

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import * as path from "node:path";
 
+import { EMPATRA_HOST_CAPABILITIES } from "../src/modes/empatra-host";
+
 const temporaryRoots: string[] = [];
 const compiledHostBinary = Bun.env.EMPATRA_HOST_BINARY;
 
@@ -74,7 +76,7 @@ describe("standalone Empatra OMP host entry", () => {
 			.split("\n")
 			.map(frame => JSON.parse(frame));
 		expect(frames[0]).toMatchObject({
-			capabilities: ["thread_read.turns-v2"],
+			capabilities: EMPATRA_HOST_CAPABILITIES,
 			protocolVersion: 6,
 			type: "host_ready",
 		});

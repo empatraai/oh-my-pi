@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
 	createEmpatraHostOutboundWriter,
-	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
+	EMPATRA_HOST_CAPABILITIES,
 	type EmpatraHostEvent,
 	type EmpatraHostInitializeCommand,
 	EmpatraHostProtocolError,
@@ -505,7 +505,7 @@ describe("Empatra host protocol server", () => {
 
 		const frames = output.map(frame => JSON.parse(frame));
 		expect(frames[0]).toMatchObject({
-			capabilities: [EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY],
+			capabilities: EMPATRA_HOST_CAPABILITIES,
 			protocolVersion: 6,
 			type: "host_ready",
 		});

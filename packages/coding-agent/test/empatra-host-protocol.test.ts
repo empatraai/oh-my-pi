@@ -2,15 +2,23 @@ import { describe, expect, test } from "bun:test";
 
 import {
 	computeEmpatraHostToolCatalogRevision,
+	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_CAPABILITIES,
+	EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
+	EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
 	EMPATRA_HOST_MAX_HOST_TOOL_RESULT_BYTES,
 	EMPATRA_HOST_MAX_IMAGE_BYTES,
 	EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES,
+	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
 	EMPATRA_HOST_PROTOCOL_VERSION,
+	EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
+	EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
+	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
 	type EmpatraHostEvent,
 	type EmpatraHostInitializeCommand,
 	EmpatraHostProtocolError,
+	parseEmpatraHostCapabilities,
 	parseEmpatraHostCommand,
 	serializeEmpatraHostFrame,
 } from "../src/modes/empatra-host";
@@ -47,6 +55,28 @@ const validInitialize: EmpatraHostInitializeCommand = {
 };
 
 describe("Empatra host protocol", () => {
+	test("advertises the closed versioned capability catalog and parses strict subsets", () => {
+		expect(EMPATRA_HOST_CAPABILITIES).toEqual([
+			EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
+			EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
+			EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
+			EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
+			EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
+			EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
+			EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
+		]);
+		expect(parseEmpatraHostCapabilities(EMPATRA_HOST_CAPABILITIES)).toEqual(EMPATRA_HOST_CAPABILITIES);
+		expect(parseEmpatraHostCapabilities([EMPATRA_HOST_NATIVE_PLAN_CAPABILITY])).toEqual([
+			EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
+		]);
+		expect(() => parseEmpatraHostCapabilities(["thread_lifecycle.atomic-v2"])).toThrow("host capability is invalid");
+		expect(() =>
+			parseEmpatraHostCapabilities([EMPATRA_HOST_THREAD_GOALS_CAPABILITY, EMPATRA_HOST_THREAD_GOALS_CAPABILITY]),
+		).toThrow("host capabilities must be unique");
+		expect(() => parseEmpatraHostCapabilities(["full_access.v1"])).toThrow("host capability is invalid");
+		expect(() => parseEmpatraHostCapabilities(["mcp.tools.v1"])).toThrow("host capability is invalid");
+	});
+
 	test("accepts a strict injected host bootstrap", () => {
 		const command = parseEmpatraHostCommand(JSON.stringify(validInitialize));
 
