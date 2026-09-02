@@ -64,6 +64,38 @@ export interface EmpatraHostImageGenerationEvent {
 	version: typeof EMPATRA_HOST_IMAGE_GENERATION_VERSION;
 }
 
+/**
+ * Sidecar-to-controller request.  The payload deliberately contains only
+ * content-addressed image metadata; provider credentials and image bytes stay
+ * outside of the OMP process boundary.
+ */
+export interface EmpatraHostImageGenerationRequestedEvent {
+	capability: typeof EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY;
+	event: "image_generation_requested";
+	generation: number;
+	request: EmpatraHostImageGenerationRequest;
+	sequence: number;
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+	version: typeof EMPATRA_HOST_IMAGE_GENERATION_VERSION;
+}
+
+/** Main-owned response command correlated to a single request digest. */
+export interface EmpatraHostImageGenerationResponseCommand {
+	capability: typeof EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY;
+	error?: Readonly<{ code: string; message: string }>;
+	expectedGeneration: number;
+	id: string;
+	requestSha256: string;
+	result?: EmpatraHostImageGenerationResult;
+	status: "completed" | "failed";
+	threadId: string;
+	turnId: string;
+	type: "image_generation_response";
+	version: typeof EMPATRA_HOST_IMAGE_GENERATION_VERSION;
+}
+
 export type EmpatraHostImageGenerationCommand = EmpatraHostImageGenerationRequest;
 export type EmpatraHostImageGenerationResponse = EmpatraHostImageGenerationEvent;
 
@@ -86,6 +118,10 @@ function boundedIdentity(value: unknown, field: string): string {
 		throw new EmpatraHostProtocolError("invalid_request", `${field} is invalid`);
 	}
 	return value;
+}
+
+function isBoundedIdentity(value: unknown, maxLength = 256): value is string {
+	return typeof value === "string" && value.length > 0 && value.length <= maxLength && !CONTROL_CHARACTER.test(value);
 }
 
 function boundedInteger(value: unknown, field: string, min: number, max: number): number {
@@ -234,6 +270,59 @@ export function parseEmpatraHostImageGenerationRequest(value: unknown): EmpatraH
 	return { ...request, requestSha256: value.requestSha256 };
 }
 
+export function parseEmpatraHostImageGenerationRequestedEvent(
+	value: unknown,
+): EmpatraHostImageGenerationRequestedEvent | null {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, [
+			"capability",
+			"event",
+			"generation",
+			"request",
+			"sequence",
+			"threadId",
+			"turnId",
+			"type",
+			"version",
+		]) ||
+		value.capability !== EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY ||
+		value.event !== "image_generation_requested" ||
+		value.type !== "host_event" ||
+		value.version !== EMPATRA_HOST_IMAGE_GENERATION_VERSION ||
+		!Number.isSafeInteger(value.generation) ||
+		(value.generation as number) < 1 ||
+		!Number.isSafeInteger(value.sequence) ||
+		(value.sequence as number) < 1 ||
+		!isBoundedIdentity(value.threadId) ||
+		!isBoundedIdentity(value.turnId)
+	)
+		return null;
+	let request: EmpatraHostImageGenerationRequest;
+	try {
+		request = parseEmpatraHostImageGenerationRequest(value.request);
+	} catch {
+		return null;
+	}
+	if (
+		request.expectedGeneration !== value.generation ||
+		request.threadId !== value.threadId ||
+		request.turnId !== value.turnId
+	)
+		return null;
+	return {
+		capability: EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
+		event: "image_generation_requested",
+		generation: value.generation as number,
+		request,
+		sequence: value.sequence as number,
+		threadId: value.threadId as string,
+		turnId: value.turnId as string,
+		type: "host_event",
+		version: EMPATRA_HOST_IMAGE_GENERATION_VERSION,
+	};
+}
+
 function parseResult(value: unknown): EmpatraHostImageGenerationResult {
 	if (!isRecord(value) || !hasOnlyKeys(value, ["images", "revisedPrompt"]) || !Array.isArray(value.images)) {
 		throw new EmpatraHostProtocolError("image_generation_invalid", "image generation result is invalid");
@@ -247,6 +336,76 @@ function parseResult(value: unknown): EmpatraHostImageGenerationResult {
 		throw new EmpatraHostProtocolError("image_generation_invalid", "revisedPrompt is invalid");
 	}
 	return { images, ...(value.revisedPrompt === undefined ? {} : { revisedPrompt: value.revisedPrompt }) };
+}
+
+export function parseEmpatraHostImageGenerationResponseCommand(
+	value: unknown,
+): EmpatraHostImageGenerationResponseCommand | null {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, [
+			"capability",
+			"error",
+			"expectedGeneration",
+			"id",
+			"requestSha256",
+			"result",
+			"status",
+			"threadId",
+			"turnId",
+			"type",
+			"version",
+		]) ||
+		value.capability !== EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY ||
+		value.type !== "image_generation_response" ||
+		value.version !== EMPATRA_HOST_IMAGE_GENERATION_VERSION ||
+		(value.status !== "completed" && value.status !== "failed") ||
+		!Number.isSafeInteger(value.expectedGeneration) ||
+		(value.expectedGeneration as number) < 1 ||
+		!isBoundedIdentity(value.id) ||
+		!isBoundedIdentity(value.threadId) ||
+		!isBoundedIdentity(value.turnId) ||
+		typeof value.requestSha256 !== "string" ||
+		!REQUEST_SHA256.test(value.requestSha256) ||
+		(value.status === "completed"
+			? value.result === undefined || value.error !== undefined
+			: value.result !== undefined || !isRecord(value.error) || !hasOnlyKeys(value.error, ["code", "message"]))
+	)
+		return null;
+	if (value.status === "completed") {
+		let result: EmpatraHostImageGenerationResult;
+		try {
+			result = parseResult(value.result);
+		} catch {
+			return null;
+		}
+		return {
+			capability: EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
+			expectedGeneration: value.expectedGeneration as number,
+			id: value.id as string,
+			requestSha256: value.requestSha256 as string,
+			result,
+			status: "completed",
+			threadId: value.threadId as string,
+			turnId: value.turnId as string,
+			type: "image_generation_response",
+			version: EMPATRA_HOST_IMAGE_GENERATION_VERSION,
+		};
+	}
+	const error = value.error;
+	if (!isRecord(error) || !isBoundedIdentity(error.code, 64) || !isBoundedIdentity(error.message, 512)) return null;
+	return {
+		capability: EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
+		error: { code: error.code as string, message: error.message as string },
+		expectedGeneration: value.expectedGeneration as number,
+		id: value.id as string,
+		requestSha256: value.requestSha256 as string,
+		status: "failed",
+		threadId: value.threadId as string,
+		turnId: value.turnId as string,
+		type: "image_generation_response",
+		version: EMPATRA_HOST_IMAGE_GENERATION_VERSION,
+	};
 }
 
 /** Validate a result event before projecting it to a controller. */

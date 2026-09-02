@@ -6,6 +6,20 @@ import type {
 	EmpatraHostInteractionRequest,
 	EmpatraHostUserInputResponse,
 } from "./interaction-broker";
+import {
+	parseEmpatraHostImageGenerationRequestedEvent,
+	parseEmpatraHostImageGenerationResponseCommand,
+	parseEmpatraHostImageGenerationEvent,
+	type EmpatraHostImageGenerationRequestedEvent,
+	type EmpatraHostImageGenerationResponseCommand,
+	type EmpatraHostImageGenerationEvent,
+} from "./image-generation";
+import {
+	type EmpatraHostExecutionBrokerRequestEvent,
+	type EmpatraHostExecutionBrokerResponseCommand,
+	parseEmpatraHostExecutionBrokerRequestEvent,
+	parseEmpatraHostExecutionBrokerResponse,
+} from "./execution-broker";
 
 export const EMPATRA_HOST_PROTOCOL_VERSION = 6 as const;
 export const EMPATRA_HOST_MAX_FRAME_BYTES = 1024 * 1024;
@@ -70,6 +84,7 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
 	EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY,
 	EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY,
+	EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
 ] as const;
 export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
 const EMPATRA_HOST_CAPABILITY_SET = new Set<string>(EMPATRA_HOST_CAPABILITIES);
@@ -478,7 +493,9 @@ export type EmpatraHostCommand =
 	| EmpatraHostGoalClearCommand
 	| EmpatraHostGoalGetCommand
 	| EmpatraHostGoalSetCommand
+	| EmpatraHostExecutionBrokerResponseCommand
 	| EmpatraHostInitializeCommand
+	| EmpatraHostImageGenerationResponseCommand
 	| EmpatraHostInteractionActivityCommand
 	| EmpatraHostInteractionCancelCommand
 	| EmpatraHostInteractionRespondCommand
@@ -663,6 +680,9 @@ export interface EmpatraHostToolExecutionEndEvent extends EmpatraHostToolEventBa
 }
 
 export type EmpatraHostEvent =
+	| EmpatraHostImageGenerationRequestedEvent
+	| EmpatraHostImageGenerationEvent
+	| EmpatraHostExecutionBrokerRequestEvent
 	| EmpatraHostInteractionRequestedEvent
 	| EmpatraHostPlanProposalEvent
 	| EmpatraHostToolExecutionEndEvent
@@ -1261,6 +1281,13 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 	const id = identifier(parsed.id, "id");
 
 	switch (parsed.type) {
+		case "image_generation_response": {
+			const response = parseEmpatraHostImageGenerationResponseCommand(parsed);
+			if (!response) {
+				throw new EmpatraHostProtocolError("invalid_request", "image_generation_response is invalid");
+			}
+			return { ...response, id };
+		}
 		case "host_tools_replace":
 			if (
 				!hasOnlyKeys(parsed, ["catalogRevision", "id", "tools", "type"]) ||
@@ -1314,6 +1341,8 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 				turnId: identifier(parsed.turnId, "turnId"),
 				type: "host_tool_cancel",
 			};
+		case "execution_broker_response":
+			return parseEmpatraHostExecutionBrokerResponse(parsed);
 		case "host_shutdown":
 			if (!hasOnlyKeys(parsed, ["id", "type"])) {
 				throw new EmpatraHostProtocolError("invalid_request", `${parsed.type} contains unknown fields`);
@@ -1751,6 +1780,17 @@ export function serializeEmpatraHostFrame(
 			throw new EmpatraHostProtocolError("invalid_request", "host_ready is invalid");
 		}
 		parseEmpatraHostCapabilities(frame.capabilities);
+	}
+	if (frame.type === "host_event" && frame.event === "execution_broker_request") {
+		parseEmpatraHostExecutionBrokerRequestEvent(frame);
+	}
+	if (frame.type === "host_event" && frame.event === "image_generation_requested") {
+		if (!parseEmpatraHostImageGenerationRequestedEvent(frame)) {
+			throw new EmpatraHostProtocolError("invalid_request", "image_generation_requested is invalid");
+		}
+	}
+	if (frame.type === "host_event" && frame.event === "image_generation") {
+		parseEmpatraHostImageGenerationEvent(frame);
 	}
 	if (frame.type === "host_event" && frame.event === "plan_proposal") {
 		interactionDigest(frame.digest);

@@ -15,6 +15,10 @@ import {
 } from "./protocol";
 
 export interface EmpatraHostRuntime {
+	/** Resolves a main-owned image request; optional for hosts that do not advertise the capability. */
+	resolveImageGeneration?(
+		command: Extract<EmpatraHostCommand, { type: "image_generation_response" }>,
+	): Promise<unknown>;
 	archiveThread(command: Extract<EmpatraHostCommand, { type: "thread_archive" }>): Promise<unknown>;
 	getAtomicOperationStatus(
 		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
@@ -256,6 +260,11 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 		command: Exclude<EmpatraHostCommand, EmpatraHostInitializeCommand | { type: "host_shutdown" }>,
 	) => {
 		switch (command.type) {
+			case "image_generation_response":
+				if (!options.runtime.resolveImageGeneration) {
+					throw new EmpatraHostProtocolError("invalid_request", "Image generation is unavailable for this host");
+				}
+				return options.runtime.resolveImageGeneration(command);
 			case "thread_create":
 				return options.runtime.startThread(command);
 			case "thread_create_and_start":
