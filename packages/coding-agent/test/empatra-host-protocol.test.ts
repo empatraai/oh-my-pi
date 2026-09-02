@@ -14,6 +14,7 @@ import {
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
 	EMPATRA_HOST_PROTOCOL_VERSION,
 	EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
+	EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY,
 	EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
 	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
 	type EmpatraHostEvent,
@@ -66,6 +67,7 @@ describe("Empatra host protocol", () => {
 			EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
 			EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
 			EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY,
+			EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY,
 		]);
 		expect(parseEmpatraHostCapabilities(EMPATRA_HOST_CAPABILITIES)).toEqual(EMPATRA_HOST_CAPABILITIES);
 		expect(parseEmpatraHostCapabilities([EMPATRA_HOST_NATIVE_PLAN_CAPABILITY])).toEqual([
@@ -225,11 +227,17 @@ describe("Empatra host protocol", () => {
 			id: "plan-turn-1",
 			message: "Составь план",
 			mode: "plan" as const,
+			modelId: "managed-model",
 			threadId: "thread-1",
 			turnId: "turn-1",
 			type: "turn_start" as const,
+			systemPrompt: "Базовые правила\n\nПравила проекта",
 		};
 		expect(parseEmpatraHostCommand(JSON.stringify(turn))).toEqual(turn);
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...turn, modelId: "" }))).toThrow("modelId is invalid");
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...turn, systemPrompt: "" }))).toThrow(
+			"systemPrompt is invalid",
+		);
 		const resolution = {
 			action: "revise" as const,
 			digest,

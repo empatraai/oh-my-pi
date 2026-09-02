@@ -5088,6 +5088,12 @@ export class AgentSession {
 		return this.#tools.refreshBaseSystemPrompt();
 	}
 
+	/** Replaces the host-owned base prompt for the next turn. */
+	setBaseSystemPrompt(prompt: string[]): void {
+		this.#tools.setBaseSystemPrompt(prompt);
+		this.agent.setSystemPrompt(prompt);
+	}
+
 	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
 		return this.#tools.buildSystemPromptForAgentStart(promptText);
 	}

@@ -14,6 +14,7 @@ import type { Skill } from "../../extensibility/skills";
 import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
 import { readPlanFile } from "../../plan-mode/plan-files";
 import type { PlanModeState } from "../../plan-mode/state";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 import type { AgentSessionEvent } from "../../session/agent-session-events";
 import { BlobStore } from "../../session/blob-store";
 import type { SessionEntry } from "../../session/session-entries";
@@ -234,6 +235,12 @@ export interface EmpatraHostSession {
 	setPlanModeState?(state: PlanModeState | undefined): void;
 	setPlanProposalHandler?(handler: PlanProposalHandler | null): void;
 	setPlanReferencePath?(planFilePath: string): void;
+	setBaseSystemPrompt?(prompt: string[]): void;
+	setModelTemporary?(
+		model: Model<"openai-responses">,
+		thinkingLevel?: ConfiguredThinkingLevel,
+		options?: { ephemeral?: boolean },
+	): Promise<void>;
 	steer(message: string, images?: ImageContent[]): Promise<void>;
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void;
 	setThinkingLevel?(level: ThinkingLevel): void;
@@ -901,6 +908,8 @@ async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions):
 		setPlanModeState: session.setPlanModeState.bind(session),
 		setPlanProposalHandler: session.setPlanProposalHandler.bind(session),
 		setPlanReferencePath: session.setPlanReferencePath.bind(session),
+		setBaseSystemPrompt: session.setBaseSystemPrompt.bind(session),
+		setModelTemporary: session.setModelTemporary.bind(session),
 		setThinkingLevel: session.setThinkingLevel.bind(session),
 		setToolUIContext,
 		steer: session.steer.bind(session),
@@ -1867,7 +1876,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 
 	async startTurn(command: TurnStartCommand): Promise<unknown> {
 		return this.#withThreadCommand(command.threadId, async () => {
-			const preparedImages = await this.#prepareImagesForThread(command.threadId, command.images);
+			const preparedImages = await this.#prepareImagesForThread(command.threadId, command.images, command.modelId);
 			return this.#startTurnLocked(command, { preparedImages });
 		});
 	}
@@ -2110,6 +2119,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				command.expectedGeneration,
 			);
 			try {
+				await this.#applyTurnConfiguration(state.handle, command);
 				this.#applyReasoningEffort(state.handle, command.reasoningEffort ?? null);
 				this.#configureApprovalMode(state.handle, command.approvalMode ?? state.handle.defaultApprovalMode);
 				this.#configureMode(state.handle, command.mode);
@@ -2190,10 +2200,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	async #prepareImagesForThread(
 		threadId: string,
 		descriptors: readonly EmpatraHostImageDescriptor[] | undefined,
+		modelId?: string,
 	): Promise<EmpatraHostPreparedImages | undefined> {
 		if (!descriptors) return undefined;
 		const resident = this.#registry.get(threadId);
-		let model = resident?.handle.model;
+		let model = modelId === undefined ? resident?.handle.model : this.#requireModel(modelId);
 		if (!model) {
 			const session = await this.#findThread(threadId);
 			const manager = await this.#openSessionManager(session.path);
@@ -2428,6 +2439,45 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			release();
 			if (this.#operationCommandTails.get(operationId) === tail) this.#operationCommandTails.delete(operationId);
 		}
+	}
+
+	/**
+	 * Applies a controller-requested configuration for the next turn while the
+	 * per-thread command queue is held.  The durable host config is written
+	 * after the in-memory session accepts the model/prompt, so a rejected model
+	 * never changes the persisted thread contract.
+	 */
+	async #applyTurnConfiguration(handle: ThreadHandle, command: TurnStartCommand): Promise<void> {
+		if (command.modelId === undefined && command.systemPrompt === undefined) return;
+		const current = findThreadConfig(handle.sessionManager);
+		const nextModel = command.modelId === undefined ? handle.model : this.#requireModel(command.modelId);
+		const nextSystemPrompt = command.systemPrompt ?? current.systemPrompt;
+		const modelChanged = nextModel.id !== current.modelId;
+		const promptChanged = nextSystemPrompt !== current.systemPrompt;
+		if (!modelChanged && !promptChanged) return;
+		if (modelChanged) {
+			if (!handle.session.setModelTemporary) {
+				throw new EmpatraHostProtocolError("runtime_error", "OMP session cannot switch models");
+			}
+			await handle.session.setModelTemporary(nextModel, undefined, { ephemeral: true });
+		}
+		if (promptChanged) {
+			if (!handle.session.setBaseSystemPrompt) {
+				throw new EmpatraHostProtocolError("runtime_error", "OMP session cannot switch system prompts");
+			}
+			handle.session.setBaseSystemPrompt([nextSystemPrompt]);
+		}
+		handle.sessionManager.appendCustomEntry(EMPATRA_THREAD_CONFIG_ENTRY, {
+			...(current.approvalMode === undefined ? {} : { approvalMode: current.approvalMode }),
+			...(current.mode === undefined ? {} : { mode: current.mode }),
+			modelId: nextModel.id,
+			operationId: current.operationId,
+			systemPrompt: nextSystemPrompt,
+			version: EMPATRA_THREAD_CONFIG_VERSION,
+		} satisfies PersistedThreadConfig);
+		await handle.sessionManager.flush();
+		handle.model = nextModel;
+		handle.modelContextWindow = nextModel.contextWindow ?? 0;
 	}
 
 	#recordThreadMetadata(handle: ThreadHandle, operationId: string, archived: boolean): void {

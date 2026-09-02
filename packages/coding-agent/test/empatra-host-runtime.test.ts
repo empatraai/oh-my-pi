@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import {
 	computeEmpatraHostToolCatalogRevision,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
@@ -50,6 +50,16 @@ function initializeCommand(workspace: string, sessionDirectory: string): Empatra
 				maxTokens: 32_000,
 				name: "Managed Model",
 				reasoning: true,
+				supportsTools: true,
+			},
+			{
+				api: "openai-responses",
+				contextWindow: 128_000,
+				id: "alternate-model",
+				input: ["text"],
+				maxTokens: 16_000,
+				name: "Alternate Model",
+				reasoning: false,
 				supportsTools: true,
 			},
 		],
@@ -99,6 +109,8 @@ class FakeSession implements EmpatraHostSession {
 	planModeState?: PlanModeState;
 	planProposalHandler?: PlanProposalHandler;
 	planReferencePath?: string;
+	modelId?: string;
+	systemPrompt?: string[];
 
 	async abort(): Promise<void> {
 		this.onAbort?.();
@@ -141,6 +153,18 @@ class FakeSession implements EmpatraHostSession {
 
 	setPlanReferencePath(planFilePath: string): void {
 		this.planReferencePath = planFilePath;
+	}
+
+	setBaseSystemPrompt(prompt: string[]): void {
+		this.systemPrompt = [...prompt];
+	}
+
+	async setModelTemporary(
+		model: Model<"openai-responses">,
+		_thinkingLevel?: unknown,
+		_options?: { ephemeral?: boolean },
+	): Promise<void> {
+		this.modelId = model.id;
 	}
 
 	getAllToolNames(): string[] {
@@ -247,6 +271,42 @@ await new Promise(() => {});`,
 		})) as { generation: number; threadId: string };
 		expect(created.generation).toBe(0);
 		expect(created.threadId).toBeString();
+		await runtime.dispose();
+	});
+
+	test("applies per-turn model and system-prompt configuration before dispatch", async () => {
+		const host = await temporaryHost();
+		const session = new FakeSession();
+		let prompted = false;
+		session.onPrompt = async () => {
+			prompted = true;
+		};
+		const runtime = new EmpatraHostAgentRuntime({ sessionFactory: async () => session });
+		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+		const created = (await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-config-session",
+			modelId: "managed-model",
+			operationId: "operation-config-session",
+			systemPrompt: "Base system prompt",
+			type: "thread_create",
+		})) as { generation: number; threadId: string };
+
+		await expect(
+			runtime.startTurn({
+				expectedGeneration: created.generation,
+				id: "start-config-turn",
+				message: "Используй новую конфигурацию",
+				modelId: "alternate-model",
+				systemPrompt: "Base system prompt\n\nProject rules",
+				threadId: created.threadId,
+				turnId: "config-turn-1",
+				type: "turn_start",
+			}),
+		).resolves.toMatchObject({ threadId: created.threadId, turnId: "config-turn-1" });
+		expect(session.modelId).toBe("alternate-model");
+		expect(session.systemPrompt).toEqual(["Base system prompt\n\nProject rules"]);
+		expect(prompted).toBe(true);
 		await runtime.dispose();
 	});
 

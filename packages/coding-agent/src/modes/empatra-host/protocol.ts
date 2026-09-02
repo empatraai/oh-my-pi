@@ -46,6 +46,8 @@ export const EMPATRA_HOST_THREAD_GOALS_CAPABILITY = "goals.thread-v1" as const;
 export const EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY = "thread_read.turns-v2" as const;
 /** Explicit, hash-bound lifecycle extensions only; ambient discovery remains disabled. */
 export const EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY = "extensions.explicit-v1" as const;
+/** Per-turn model and system-prompt changes, committed by the host before dispatch. */
+export const EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY = "turn_configuration.v1" as const;
 export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
@@ -55,6 +57,7 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
 	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
 	EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY,
+	EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY,
 ] as const;
 export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
 const EMPATRA_HOST_CAPABILITY_SET = new Set<string>(EMPATRA_HOST_CAPABILITIES);
@@ -387,7 +390,11 @@ export interface EmpatraHostTurnStartCommand {
 	images?: EmpatraHostImageDescriptor[];
 	message: string;
 	mode?: EmpatraHostMode;
+	/** Optional next-turn model; omitted means keep the persisted model. */
+	modelId?: string;
 	reasoningEffort?: EmpatraHostReasoningEffort | null;
+	/** Optional next-turn system prompt; omitted means keep the persisted prompt. */
+	systemPrompt?: string;
 	threadId: string;
 	turnId: string;
 	type: "turn_start";
@@ -1625,10 +1632,12 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					"images",
 					"message",
 					"mode",
+					"modelId",
 					"reasoningEffort",
 					"threadId",
 					"turnId",
 					"type",
+					"systemPrompt",
 				])
 			) {
 				throw new EmpatraHostProtocolError("invalid_request", "turn_start contains unknown fields");
@@ -1649,9 +1658,13 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					...(images ? { images } : {}),
 					message: promptMessage(parsed.message, images),
 					...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),
+					...(parsed.modelId === undefined ? {} : { modelId: identifier(parsed.modelId, "modelId") }),
 					...(parsed.reasoningEffort === undefined
 						? {}
 						: { reasoningEffort: optionalReasoningEffort(parsed.reasoningEffort) }),
+					...(parsed.systemPrompt === undefined
+						? {}
+						: { systemPrompt: boundedText(parsed.systemPrompt, "systemPrompt", 1, 262_144) }),
 					threadId: identifier(parsed.threadId, "threadId"),
 					turnId: identifier(parsed.turnId, "turnId"),
 					type: "turn_start",
