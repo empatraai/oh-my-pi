@@ -6,8 +6,11 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import {
 	computeEmpatraHostToolCatalogRevision,
+	createEmpatraHostResourcesBrokerTransport,
 	createEmpatraHostSubagentRpcTransport,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
+	EMPATRA_HOST_RESOURCES_CAPABILITY,
+	EMPATRA_HOST_RESOURCES_VERSION,
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	EMPATRA_HOST_THREAD_READ_TARGET_BYTES,
 	EMPATRA_HOST_TOOL_ENTRY,
@@ -21,6 +24,7 @@ import {
 	type EmpatraHostSessionFactoryOptions,
 	type EmpatraHostToolCallFrame,
 	serializeEmpatraHostFrame,
+	digestEmpatraHostResourcesRequest,
 } from "../src/modes/empatra-host";
 import type { PlanApprovalDetails } from "../src/plan-mode/approved-plan";
 import type { PlanModeState } from "../src/plan-mode/state";
@@ -198,6 +202,48 @@ afterEach(async () => {
 });
 
 describe("Empatra host AgentSession runtime", () => {
+	test("advertises and routes negotiated main-owned resources without local authority", async () => {
+		let requestId = "";
+		const transport = createEmpatraHostResourcesBrokerTransport({
+			capabilities: [EMPATRA_HOST_RESOURCES_CAPABILITY],
+			emitRequest: async event => {
+				requestId = event.request.requestId;
+			},
+			requestTimeoutMs: 1000,
+		});
+		const runtime = new EmpatraHostAgentRuntime({ resourcesTransport: transport });
+		expect(runtime.getAdvertisedCapabilities()).toContain(EMPATRA_HOST_RESOURCES_CAPABILITY);
+		const pending = transport.broker.list({ generation: 1, threadId: "thread-resources", turnId: "turn-resources" });
+		await new Promise(resolve => setTimeout(resolve, 0));
+		const request = {
+			capability: EMPATRA_HOST_RESOURCES_CAPABILITY,
+			generation: 1,
+			method: "resources/list" as const,
+			requestId,
+			threadId: "thread-resources",
+			turnId: "turn-resources",
+			type: "resources_request" as const,
+			version: EMPATRA_HOST_RESOURCES_VERSION,
+		};
+		runtime.handleResourcesResponse({
+			capability: EMPATRA_HOST_RESOURCES_CAPABILITY,
+			expectedGeneration: 1,
+			generation: 1,
+			id: "resources-response-runtime",
+			method: "resources/list",
+			requestId,
+			requestSha256: digestEmpatraHostResourcesRequest(request),
+			result: { catalogDigest: `sha256:${"b".repeat(64)}`, resources: [] },
+			status: "completed",
+			threadId: "thread-resources",
+			turnId: "turn-resources",
+			type: "resources_response",
+			version: EMPATRA_HOST_RESOURCES_VERSION,
+		});
+		expect(await pending).toMatchObject({ resources: [] });
+		await runtime.dispose();
+	});
+
 	test("routes lifecycle commands through the injected RPC broker", async () => {
 		const host = await temporaryHost();
 		const events: unknown[] = [];

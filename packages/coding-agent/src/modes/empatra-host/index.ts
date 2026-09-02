@@ -6,6 +6,7 @@ export * from "./host-tools";
 export * from "./image-generation";
 export * from "./interaction-broker";
 export * from "./mcp-oauth-broker";
+export * from "./resources";
 export * from "./media-input";
 export * from "./protocol";
 export * from "./runtime";

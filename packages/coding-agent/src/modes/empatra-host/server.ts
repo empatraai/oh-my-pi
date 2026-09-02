@@ -4,6 +4,7 @@ import { EmpatraHostProtocolError } from "./errors";
 import {
 	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_MCP_OAUTH_CAPABILITY,
+	EMPATRA_HOST_RESOURCES_CAPABILITY,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
 	EMPATRA_HOST_PROTOCOL_VERSION,
 	type EmpatraHostCommand,
@@ -15,6 +16,7 @@ import {
 	projectEmpatraHostFailure,
 	serializeEmpatraHostFrame,
 } from "./protocol";
+import type { EmpatraHostResourcesResponseCommand } from "./resources";
 import { encodeEmpatraHostFrames, EmpatraHostFrameDecoder } from "./frame";
 import type {
 	EmpatraHostSubagentCloseCommand,
@@ -44,6 +46,8 @@ export interface EmpatraHostRuntime {
 	handleExecutionBrokerResponse(command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void;
 	/** Completes a main-owned MCP OAuth request; no credential material is accepted. */
 	handleMcpOAuthResponse?(command: Extract<EmpatraHostCommand, { type: "mcp_oauth_response" }>): void;
+	/** Completes a main-owned resource request; no config or credential material is accepted. */
+	handleResourcesResponse?(command: EmpatraHostResourcesResponseCommand): void;
 	handleSubagentResponse?(command: Extract<EmpatraHostCommand, { type: "subagent_response" }>): void;
 	clearThreadGoal(command: Extract<EmpatraHostCommand, { type: "goal_clear" }>): Promise<unknown>;
 	compactThread(command: Extract<EmpatraHostCommand, { type: "thread_compact" }>): Promise<unknown>;
@@ -446,6 +450,7 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 				command.type === "host_tool_cancel" ||
 				command.type === "execution_broker_response" ||
 				command.type === "mcp_oauth_response" ||
+				command.type === "resources_response" ||
 				command.type === "subagent_response"
 			) {
 				try {
@@ -466,6 +471,20 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 							);
 						}
 						options.runtime.handleMcpOAuthResponse(command);
+					} else if (command.type === "resources_response") {
+						if (!advertisedCapabilities.includes(EMPATRA_HOST_RESOURCES_CAPABILITY)) {
+							throw new EmpatraHostProtocolError(
+								"resources_unavailable",
+								"Host resources capability was not negotiated by the main host",
+							);
+						}
+						if (!options.runtime.handleResourcesResponse) {
+							throw new EmpatraHostProtocolError(
+								"resources_unavailable",
+								"Host resources response transport is not connected",
+							);
+						}
+						options.runtime.handleResourcesResponse(command);
 					}
 					else if (!advertisedCapabilities.includes(EMPATRA_HOST_SUBAGENT_CAPABILITY)) {
 						throw new EmpatraHostProtocolError("subagent_unavailable", "Subagent RPC was not negotiated by the main host");

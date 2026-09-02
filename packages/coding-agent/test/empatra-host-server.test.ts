@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
 	createEmpatraHostOutboundWriter,
 	EMPATRA_HOST_CAPABILITIES,
+	EMPATRA_HOST_RESOURCES_CAPABILITY,
+	EMPATRA_HOST_RESOURCES_VERSION,
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	EmpatraHostSubagentController,
 	type EmpatraHostEvent,
@@ -437,6 +439,46 @@ describe("Empatra host protocol server", () => {
 		});
 		expect(handled).toEqual(["execution-response-1"]);
 		expect(output.map(frame => JSON.parse(frame)).some(frame => frame.id === "execution-response-1")).toBe(false);
+	});
+
+	test("routes a negotiated main-owned resources response without echoing its payload", async () => {
+		const handled: string[] = [];
+		const output: string[] = [];
+		await runEmpatraHostServer({
+			input: inputStream([
+				initializeCommand(),
+				{
+					capability: EMPATRA_HOST_RESOURCES_CAPABILITY,
+					expectedGeneration: 1,
+					generation: 1,
+					id: "resources-response-1",
+					method: "resources/list",
+					requestId: "resources-request-1",
+					requestSha256: `sha256:${"a".repeat(64)}`,
+					result: {
+						catalogDigest: `sha256:${"b".repeat(64)}`,
+						resources: [{ name: "Документ", uri: "empatra://resource/document" }],
+					},
+					status: "completed",
+					threadId: "thread-resources",
+					turnId: "turn-resources",
+					type: "resources_response",
+					version: EMPATRA_HOST_RESOURCES_VERSION,
+				},
+				{ id: "shutdown-resources", type: "host_shutdown" },
+			]),
+			runtime: runtime({
+				getAdvertisedCapabilities: () => [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_RESOURCES_CAPABILITY],
+				handleResourcesResponse(command) {
+					handled.push(command.id);
+				},
+			}),
+			write: async frame => {
+				output.push(frame);
+			},
+		});
+		expect(handled).toEqual(["resources-response-1"]);
+		expect(output.join("\n")).not.toContain("Документ");
 	});
 
 	test("holds atomic turn events until the generated thread identity is accepted", async () => {
