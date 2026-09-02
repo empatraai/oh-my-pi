@@ -508,6 +508,11 @@ export type ToolName = BuiltinToolName;
 /** Narrow main-owned seam for the explicitly negotiated model-facing task tool. */
 export interface ModelSubagentRpcBroker {
 	readonly capability: string;
+	/** Cancellation for a child accepted during a tool abort. */
+	interrupt(
+		scope: { generation: number; parentThreadId: string; parentTurnId: string },
+		childId: string,
+	): Promise<void>;
 	spawn(
 		scope: { generation: number; parentThreadId: string; parentTurnId: string },
 		request: { agentName?: string; assignment: string; modelId?: string },
@@ -667,7 +672,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// ordinary sessions, so this cannot widen their tool surface.
 	if (session.subagentRpcBroker?.capability === EMPATRA_HOST_SUBAGENT_CAPABILITY) {
 		allTools.task = sessionForTask => new EmpatraHostSubagentTool(sessionForTask);
-	} else if (restrictToolNames && requestedTools.includes("task")) {
+	} else if (restrictToolNames && requestedTools?.includes("task")) {
 		// Never fall back to OMP's in-process TaskTool in a restricted host
 		// session: an explicit but unnegotiated request must fail closed.
 		delete allTools.task;

@@ -87,6 +87,7 @@ describe("createTools", () => {
 			restrictToolNames: true,
 			subagentRpcBroker: {
 				capability: "subagents.lifecycle.v1",
+				interrupt: async () => undefined,
 				spawn: async (scope, request) => {
 					calls.push({ scope, request });
 					return { childId: "child-1", index: 0, status: "running" as const };
@@ -109,6 +110,76 @@ describe("createTools", () => {
 				request: { agentName: "reviewer", assignment: "Проверь только контракт RPC", modelId: "managed-model" },
 			},
 		]);
+	});
+
+	it("fans out the native batch shape with shared context through the gated broker", async () => {
+		const calls: unknown[] = [];
+		let nextIndex = 0;
+		const session = createTestSession({
+			restrictToolNames: true,
+			subagentRpcBroker: {
+				capability: "subagents.lifecycle.v1",
+				spawn: async (scope, request) => {
+					calls.push({ scope, request });
+					const index = nextIndex++;
+					return { childId: `child-${index + 1}`, index, status: "running" as const };
+				},
+				interrupt: async () => undefined,
+			},
+			subagentRpcScope: () => ({ generation: 3, parentThreadId: "thread-1", parentTurnId: "turn-1" }),
+		});
+		const tools = await createTools(session, ["task"]);
+
+		const result = await tools[0]!.execute("call-batch", {
+			context: "Общий контракт: только read-only проверка.",
+			tasks: [
+				{ agent: "reviewer", model: "managed-model", task: "Проверь протокол." },
+				{ task: "Проверь обработку ошибок." },
+			],
+			cwd: "/must-not-cross-boundary",
+			env: { SECRET: "must-not-cross-boundary" },
+		});
+
+		expect(result).toMatchObject({ details: { status: "running" } });
+		expect(result.details?.children).toHaveLength(2);
+		expect(calls).toEqual([
+			{
+				scope: { generation: 3, parentThreadId: "thread-1", parentTurnId: "turn-1" },
+				request: {
+					agentName: "reviewer",
+					assignment: "Общий контракт: только read-only проверка.\n\nAssignment:\nПроверь протокол.",
+					modelId: "managed-model",
+				},
+			},
+			{
+				scope: { generation: 3, parentThreadId: "thread-1", parentTurnId: "turn-1" },
+				request: {
+					assignment: "Общий контракт: только read-only проверка.\n\nAssignment:\nПроверь обработку ошибок.",
+				},
+			},
+		]);
+		expect(JSON.stringify(calls)).not.toMatch(/cwd|env|secret|credential/u);
+	});
+
+	it("fails closed for an invalid or oversized batch without dispatching", async () => {
+		const spawn = vi.fn(async () => ({ childId: "never", index: 0, status: "running" as const }));
+		const session = createTestSession({
+			restrictToolNames: true,
+			subagentRpcBroker: { capability: "subagents.lifecycle.v1", interrupt: async () => undefined, spawn },
+			subagentRpcScope: () => ({ generation: 1, parentThreadId: "thread-1", parentTurnId: "turn-1" }),
+		});
+		const tools = await createTools(session, ["task"]);
+
+		const empty = await tools[0]!.execute("empty", { context: "общий фон", tasks: [] });
+		expect(empty).toMatchObject({ isError: true, details: { status: "failed" } });
+		const missingContext = await tools[0]!.execute("missing-context", { tasks: [{ task: "Задача" }] });
+		expect(missingContext).toMatchObject({ isError: true, details: { status: "failed" } });
+		const oversized = await tools[0]!.execute("oversized", {
+			context: "фон",
+			tasks: Array.from({ length: 17 }, (_, index) => ({ task: `Задача ${index + 1}` })),
+		});
+		expect(oversized).toMatchObject({ isError: true, details: { status: "failed" } });
+		expect(spawn).not.toHaveBeenCalled();
 	});
 
 	it("does not expose task without an explicit broker", async () => {

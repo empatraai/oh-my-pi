@@ -1,12 +1,34 @@
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ModelSubagentRpcBroker, ModelSubagentRpcScope, ToolSession } from "../../tools";
-import { EMPATRA_HOST_SUBAGENT_CAPABILITY } from "./subagent-broker";
+import {
+	EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN,
+	EMPATRA_HOST_MAX_SUBAGENT_ASSIGNMENT_BYTES,
+	EMPATRA_HOST_SUBAGENT_CAPABILITY,
+} from "./subagent-broker";
 
-const subagentSchema = arkType({
+const subagentItemSchema = arkType({
 	"agent?": arkType("string").describe("Optional agent selector from the main-owned catalog"),
 	"model?": arkType("string").describe("Optional managed model selector"),
 	task: arkType("string").describe("Self-contained assignment for the delegated agent"),
+	"+": "delete",
+});
+
+/**
+ * Keep the native OMP task shapes while routing each eventual spawn through
+ * Electron main. ArkType cannot infer a deterministic union for two open
+ * object morphs, so the wire schema keeps both shapes optional and the
+ * executor enforces the exact one-of rule. It is deliberately limited to selectors and text;
+ * isolation, cwd, env, credentials, executable paths, and output schemas are
+ * main-owned and therefore cannot cross this boundary.
+ */
+const subagentSchema = arkType({
+	"agent?": arkType("string").describe("Optional agent selector from the main-owned catalog"),
+	"model?": arkType("string").describe("Optional managed model selector"),
+	"task?": arkType("string").describe("Self-contained assignment for the delegated agent"),
+	"context?": arkType("string").describe("Shared background prepended to every delegated assignment"),
+	"tasks?": subagentItemSchema.array().describe("Independent assignments to start in parallel (maximum 16)"),
+	"+": "delete",
 });
 
 type SubagentInput = typeof subagentSchema.infer;
@@ -14,6 +36,14 @@ type SubagentInput = typeof subagentSchema.infer;
 export interface EmpatraHostSubagentToolDetails {
 	childId?: string;
 	index?: number;
+	status: "failed" | "running";
+	children?: readonly EmpatraHostSubagentChildDetails[];
+	error?: string;
+}
+
+export interface EmpatraHostSubagentChildDetails {
+	childId?: string;
+	index: number;
 	status: "failed" | "running";
 	error?: string;
 }
@@ -39,7 +69,7 @@ export class EmpatraHostSubagentTool implements AgentTool<typeof subagentSchema,
 	readonly label = "Task";
 	readonly summary = "Delegate a bounded assignment to a main-owned subagent";
 	readonly description =
-		"Delegate one self-contained assignment to a managed subagent. The desktop host chooses the workspace, environment, credentials, and execution policy. Only an optional agent/model selector and the assignment are accepted.";
+		"Delegate one assignment or a parallel batch of independent assignments to managed subagents. For a batch use {context, tasks:[{task, agent?, model?}]}. The desktop host chooses workspace, environment, credentials, isolation, and execution policy; those fields are never accepted by this tool.";
 	readonly parameters = subagentSchema;
 	readonly approval = "exec" as const;
 	readonly intent = "omit" as const;
@@ -51,9 +81,17 @@ export class EmpatraHostSubagentTool implements AgentTool<typeof subagentSchema,
 		if (!args || typeof args !== "object" || Array.isArray(args)) return [];
 		const value = args as Partial<SubagentInput>;
 		const details: string[] = [];
+		if (typeof value.context === "string" && value.context.trim()) details.push(`Context:\n${value.context.trim()}`);
 		if (typeof value.agent === "string" && value.agent.trim()) details.push(`Agent: ${value.agent.trim()}`);
 		if (typeof value.model === "string" && value.model.trim()) details.push(`Model: ${value.model.trim()}`);
 		if (typeof value.task === "string") details.push(`Task:\n${value.task.trim()}`);
+		if (Array.isArray(value.tasks)) {
+			details.push(`Batch: ${value.tasks.length} assignments (maximum ${EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN})`);
+			const first = value.tasks[0];
+			if (first && typeof first === "object" && typeof first.task === "string") {
+				details.push(`First task:\n${first.task.trim()}`);
+			}
+		}
 		return details;
 	};
 
@@ -72,19 +110,103 @@ export class EmpatraHostSubagentTool implements AgentTool<typeof subagentSchema,
 			return failed("Subagent lifecycle is unavailable until the main host completes explicit RPC bootstrap.");
 		}
 		try {
-			const assignment = params.task.trim();
-			if (assignment.length === 0) return failed("Task assignment must not be empty.");
-			const result = await broker.spawn(scope, {
-				agentName: params.agent?.trim() || undefined,
-				assignment,
-				modelId: params.model?.trim() || undefined,
-			});
+			const requests = normalizeSpawnRequests(params);
+			if (requests.length === 0) return failed("Provide a task assignment or a non-empty tasks batch.");
+			if (requests.length > EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN) {
+				return failed(`Task batch exceeds the maximum of ${EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN} assignments.`);
+			}
+			const children = await Promise.all(
+				requests.map(async (request, index): Promise<EmpatraHostSubagentChildDetails> => {
+					try {
+						if (signal?.aborted) return { index, status: "failed", error: "Subagent assignment was cancelled before dispatch." };
+						const result = await broker.spawn(scope, request);
+						if (signal?.aborted) {
+							await broker.interrupt(scope, result.childId).catch(() => undefined);
+							return { childId: result.childId, index: result.index, status: "failed", error: "Subagent assignment was cancelled." };
+						}
+						return { childId: result.childId, index: result.index, status: result.status };
+					} catch (error) {
+						return { index, status: "failed", error: error instanceof Error ? error.message : String(error) };
+					}
+				}),
+			);
+			const failures = children.filter(child => child.status === "failed");
+			const started = children.filter(child => child.status === "running");
+			const status = started.length > 0 ? "running" : "failed";
+			const summary =
+				started.length === 1 && children.length === 1
+					? `Subagent ${started[0]!.childId} started.`
+					: `Started ${started.length} of ${children.length} subagents.`;
+			const failureText = failures.length > 0 ? ` ${failures.length} assignment(s) failed to start.` : "";
 			return {
-				content: [{ type: "text", text: `Subagent ${result.childId} started.` }],
-				details: { childId: result.childId, index: result.index, status: result.status },
+				content: [{ type: "text", text: `${summary}${failureText}` }],
+				details: {
+					...(children.length === 1 && children[0]!.childId !== undefined
+						? { childId: children[0]!.childId, index: children[0]!.index }
+						: {}),
+					children,
+					status,
+				},
+				...(failures.length === children.length ? { isError: true } : {}),
 			};
 		} catch (error) {
 			return failed(error instanceof Error ? error.message : String(error));
 		}
 	}
+}
+
+type SpawnRequest = { agentName?: string; assignment: string; modelId?: string };
+
+const textEncoder = new TextEncoder();
+
+function boundedAssignment(value: string, label: string): string {
+	const assignment = value.trim();
+	if (assignment.length === 0) throw new Error(`${label} must not be empty.`);
+	if (textEncoder.encode(assignment).byteLength > EMPATRA_HOST_MAX_SUBAGENT_ASSIGNMENT_BYTES) {
+		throw new Error(`${label} exceeds the ${EMPATRA_HOST_MAX_SUBAGENT_ASSIGNMENT_BYTES}-byte limit.`);
+	}
+	return assignment;
+}
+
+function selector(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") throw new Error(`${label} must be a string.`);
+	const normalized = value.trim();
+	return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeSpawnRequests(params: SubagentInput): SpawnRequest[] {
+	if (Array.isArray(params.tasks)) {
+		if (params.tasks.length === 0) return [];
+		if (params.tasks.length > EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN) {
+			throw new Error(`Task batch exceeds the maximum of ${EMPATRA_HOST_MAX_SUBAGENTS_PER_TURN} assignments.`);
+		}
+		if (params.context === undefined) throw new Error("Batch context is required.");
+		if (params.task !== undefined || params.agent !== undefined || params.model !== undefined) {
+			throw new Error("Batch shape cannot include top-level agent, model, or task fields.");
+		}
+		const context = params.context.trim();
+		const contextBytes = textEncoder.encode(context).byteLength;
+		if (contextBytes > EMPATRA_HOST_MAX_SUBAGENT_ASSIGNMENT_BYTES) {
+			throw new Error(`Batch context exceeds the ${EMPATRA_HOST_MAX_SUBAGENT_ASSIGNMENT_BYTES}-byte limit.`);
+		}
+		return params.tasks.map((item, index) => {
+			const task = boundedAssignment(item.task, `Task ${index + 1}`);
+			const assignment = context.length > 0 ? `${context}\n\nAssignment:\n${task}` : task;
+			return {
+				agentName: selector(item.agent, `Task ${index + 1} agent`),
+				assignment: boundedAssignment(assignment, `Task ${index + 1} assignment`),
+				modelId: selector(item.model, `Task ${index + 1} model`),
+			};
+		});
+	}
+	if (params.context !== undefined) throw new Error("Single task shape cannot include context.");
+	if (params.task === undefined) return [];
+	return [
+		{
+			agentName: selector(params.agent, "Agent"),
+			assignment: boundedAssignment(params.task, "Task assignment"),
+			modelId: selector(params.model, "Model"),
+		},
+	];
 }
