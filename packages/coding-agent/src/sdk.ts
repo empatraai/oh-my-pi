@@ -543,6 +543,12 @@ export interface CreateAgentSessionOptions {
 	 * and ambient custom tools remain disabled. Default: false.
 	 */
 	allowRestrictedCustomTools?: boolean;
+	/**
+	 * Permit explicitly supplied extension modules in a restricted session.
+	 * Ambient discovery and extension-registered tools remain disabled; this is
+	 * intended for a main-owned host that needs lifecycle hooks only.
+	 */
+	allowRestrictedExtensions?: boolean;
 
 	/** Output schema for structured completion (subagents). */
 	outputSchema?: unknown;
@@ -2103,7 +2109,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
+		if (restrictToolNames && options.allowRestrictedExtensions !== true) {
 			// Allocate a session runtime without evaluating caller-provided extension
 			// instances, paths, or factories.
 			extensionPaths = [];

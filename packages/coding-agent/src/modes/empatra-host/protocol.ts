@@ -16,6 +16,7 @@ export const EMPATRA_HOST_MAX_SKILL_NAME_BYTES = 128;
 export const EMPATRA_HOST_MAX_SKILL_DESCRIPTION_BYTES = 8192;
 export const EMPATRA_HOST_MAX_SKILL_SOURCE_BYTES = 128;
 export const EMPATRA_HOST_MAX_HOST_TOOLS = 256;
+export const EMPATRA_HOST_MAX_EXTENSIONS = 32;
 export const EMPATRA_HOST_MAX_HOST_TOOL_ARGUMENT_BYTES = 256 * 1024;
 export const EMPATRA_HOST_MAX_HOST_TOOL_RESULT_BYTES = 512 * 1024;
 export const EMPATRA_HOST_MAX_ASSISTANT_MESSAGES_PER_TURN = 256;
@@ -43,6 +44,8 @@ export const EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY = "host_tools.dynamic-v1" as 
 export const EMPATRA_HOST_IMAGE_INPUT_CAPABILITY = "images.input-v1" as const;
 export const EMPATRA_HOST_THREAD_GOALS_CAPABILITY = "goals.thread-v1" as const;
 export const EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY = "thread_read.turns-v2" as const;
+/** Explicit, hash-bound lifecycle extensions only; ambient discovery remains disabled. */
+export const EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY = "extensions.explicit-v1" as const;
 export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
@@ -51,6 +54,7 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
 	EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
 	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
+	EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY,
 ] as const;
 export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
 const EMPATRA_HOST_CAPABILITY_SET = new Set<string>(EMPATRA_HOST_CAPABILITIES);
@@ -82,6 +86,17 @@ export interface EmpatraHostSkill {
 	hide?: boolean;
 	name: string;
 	source: string;
+}
+
+/**
+ * Main-owned extension module staged under the private host session directory.
+ * The digest makes the module identity explicit across the process boundary;
+ * the host still canonicalizes and confines the path before loading it.
+ */
+export interface EmpatraHostExtensionDescriptor {
+	filePath: string;
+	id: string;
+	sha256: string;
 }
 
 /**
@@ -139,6 +154,7 @@ export function sanitizeEmpatraHostImageDisplayName(value: string): string {
 
 export interface EmpatraHostInitializeCommand {
 	capability: string;
+	extensions?: EmpatraHostExtensionDescriptor[];
 	gatewayBaseUrl: string;
 	id: string;
 	models: EmpatraHostModel[];
@@ -1140,10 +1156,27 @@ function skill(value: unknown): EmpatraHostSkill {
 	};
 }
 
+function extensionDescriptor(value: unknown): EmpatraHostExtensionDescriptor {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, ["filePath", "id", "sha256"]) ||
+		typeof value.sha256 !== "string" ||
+		!/^[a-f0-9]{64}$/u.test(value.sha256)
+	) {
+		throw new EmpatraHostProtocolError("invalid_request", "extensions contains an invalid extension");
+	}
+	return {
+		filePath: absolutePath(value.filePath, "extension.filePath"),
+		id: boundedString(value.id, "extension.id", 1, 256),
+		sha256: value.sha256,
+	};
+}
+
 function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeCommand {
 	if (
 		!hasOnlyKeys(value, [
 			"capability",
+			"extensions",
 			"gatewayBaseUrl",
 			"id",
 			"models",
@@ -1157,6 +1190,8 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 		!Array.isArray(value.models) ||
 		value.models.length === 0 ||
 		value.models.length > EMPATRA_HOST_MAX_MODELS ||
+		(value.extensions !== undefined &&
+			(!Array.isArray(value.extensions) || value.extensions.length > EMPATRA_HOST_MAX_EXTENSIONS)) ||
 		(value.skills !== undefined && (!Array.isArray(value.skills) || value.skills.length > EMPATRA_HOST_MAX_SKILLS)) ||
 		!Array.isArray(value.workspaceRoots) ||
 		value.workspaceRoots.length === 0 ||
@@ -1178,6 +1213,7 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 	}
 	return {
 		capability: boundedString(value.capability, "capability", 32, 512),
+		...(value.extensions === undefined ? {} : { extensions: value.extensions.map(extensionDescriptor) }),
 		gatewayBaseUrl: gatewayBaseUrl(value.gatewayBaseUrl),
 		id: identifier(value.id, "id"),
 		models,

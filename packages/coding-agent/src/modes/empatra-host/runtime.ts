@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
-import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import { type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Effort, ImageContent, Model } from "@oh-my-pi/pi-ai";
@@ -49,6 +50,7 @@ import type {
 	EmpatraHostAtomicOperationStatusResponse,
 	EmpatraHostCommand,
 	EmpatraHostEvent,
+	EmpatraHostExtensionDescriptor,
 	EmpatraHostGoalClearCommand,
 	EmpatraHostGoalGetCommand,
 	EmpatraHostGoalSetCommand,
@@ -242,6 +244,7 @@ export interface EmpatraHostSessionFactoryOptions {
 	agentDir: string;
 	capability: string;
 	cwd: string;
+	extensionPaths: readonly string[];
 	model: Model<"openai-responses">;
 	modelRegistry: ModelRegistry;
 	scopedModels: readonly Model<"openai-responses">[];
@@ -260,6 +263,8 @@ interface InitializedRuntime {
 	blobDirectory: string;
 	blobGarbageCollectionAuthority: Database;
 	capability: string;
+	extensionDescriptors: readonly EmpatraHostExtensionDescriptor[];
+	extensionPaths: readonly string[];
 	modelRegistry: ModelRegistry;
 	metadataStore: EmpatraHostThreadMetadataStore;
 	modelDefinitions: ReadonlyMap<string, EmpatraHostModel>;
@@ -304,6 +309,47 @@ async function resolveMaterializedSkills(
 			};
 		}),
 	);
+}
+
+/**
+ * Validate main-owned extension modules before any session is created. OMP
+ * never discovers extensions in user/project roots for an Empatra host: only
+ * regular files under the private session directory, bound to the digest sent
+ * by Electron main, can enter the explicit lifecycle lane.
+ */
+async function resolveMaterializedExtensions(
+	entries: readonly NonNullable<EmpatraHostInitializeCommand["extensions"]>[number][],
+	sessionDirectory: string,
+): Promise<readonly string[]> {
+	const seenPaths = new Set<string>();
+	const seenIds = new Set<string>();
+	const resolved: string[] = [];
+	for (const entry of entries) {
+		if (seenIds.has(entry.id)) {
+			throw new EmpatraHostProtocolError("invalid_request", "extension ids must be unique");
+		}
+		seenIds.add(entry.id);
+		let filePath: string;
+		try {
+			filePath = await realpath(entry.filePath);
+			const fileInfo = await lstat(filePath);
+			if (!fileInfo.isFile() || !isInsideDirectory(sessionDirectory, filePath)) {
+				throw new Error("extension module has invalid filesystem entries");
+			}
+			const digest = createHash("sha256")
+				.update(await readFile(filePath))
+				.digest("hex");
+			if (digest !== entry.sha256) throw new Error("extension module digest mismatch");
+		} catch {
+			throw new EmpatraHostProtocolError("invalid_request", "extension module is unavailable or invalid");
+		}
+		if (seenPaths.has(filePath)) {
+			throw new EmpatraHostProtocolError("invalid_request", "extension module paths must be unique");
+		}
+		seenPaths.add(filePath);
+		resolved.push(filePath);
+	}
+	return resolved;
 }
 
 async function createPrivateBlobDirectory(sessionDirectory: string): Promise<string> {
@@ -799,6 +845,7 @@ async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions):
 	const { session, setToolUIContext } = await createAgentSession({
 		agentDir: options.agentDir,
 		allowRestrictedCustomTools: false,
+		allowRestrictedExtensions: options.extensionPaths.length > 0,
 		autoApprove: false,
 		contextFiles: [],
 		cwd: options.cwd,
@@ -807,6 +854,7 @@ async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions):
 		enableLsp: false,
 		enableMCP: false,
 		extensions: [],
+		preloadedExtensionPaths: [...options.extensionPaths],
 		getApiKey: async requestedModel => {
 			if (
 				requestedModel.provider !== options.model.provider ||
@@ -898,6 +946,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		const sessionDirectory = await realpath(requestedSessionDirectory);
 		if (process.platform !== "win32") await chmod(sessionDirectory, 0o700);
 		const blobDirectory = await createPrivateBlobDirectory(sessionDirectory);
+		const extensionPaths = await resolveMaterializedExtensions(command.extensions ?? [], sessionDirectory);
 		const agentDir = path.join(sessionDirectory, "runtime");
 		await mkdir(agentDir, { mode: 0o700, recursive: true });
 		if (process.platform !== "win32") await chmod(agentDir, 0o700);
@@ -943,6 +992,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			blobDirectory,
 			blobGarbageCollectionAuthority,
 			capability: command.capability,
+			extensionDescriptors: (command.extensions ?? []).map((entry, index) => ({
+				...entry,
+				filePath: extensionPaths[index] as string,
+			})),
+			extensionPaths,
 			modelRegistry,
 			metadataStore,
 			modelDefinitions,
@@ -951,7 +1005,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			policy,
 			sessionDirectory,
 		};
-		return { modelCount: models.size, workspaceRootCount: policy.roots.length };
+		return {
+			extensionCount: extensionPaths.length,
+			modelCount: models.size,
+			workspaceRootCount: policy.roots.length,
+		};
 	}
 
 	/**
@@ -2528,6 +2586,10 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		defaultApprovalMode: EmpatraHostApprovalMode = DEFAULT_APPROVAL_MODE,
 	): Promise<ThreadHandle> {
 		const runtime = this.#requireInitialized();
+		const extensionPaths = await resolveMaterializedExtensions(
+			runtime.extensionDescriptors,
+			runtime.sessionDirectory,
+		);
 		const cwd = await runtime.policy.requireCwd(sessionManager.getCwd());
 		if (model.contextWindow === null) {
 			throw new EmpatraHostProtocolError("model_invalid", "Injected model is missing its context window");
@@ -2540,6 +2602,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			agentDir: runtime.agentDir,
 			capability: runtime.capability,
 			cwd,
+			extensionPaths,
 			model,
 			modelRegistry: runtime.modelRegistry,
 			scopedModels: [...runtime.models.values()],

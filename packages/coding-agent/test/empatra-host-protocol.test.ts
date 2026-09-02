@@ -5,6 +5,7 @@ import {
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
+	EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY,
 	EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
 	EMPATRA_HOST_MAX_HOST_TOOL_RESULT_BYTES,
@@ -64,6 +65,7 @@ describe("Empatra host protocol", () => {
 			EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
 			EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
 			EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
+			EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY,
 		]);
 		expect(parseEmpatraHostCapabilities(EMPATRA_HOST_CAPABILITIES)).toEqual(EMPATRA_HOST_CAPABILITIES);
 		expect(parseEmpatraHostCapabilities([EMPATRA_HOST_NATIVE_PLAN_CAPABILITY])).toEqual([
@@ -81,6 +83,36 @@ describe("Empatra host protocol", () => {
 		const command = parseEmpatraHostCommand(JSON.stringify(validInitialize));
 
 		expect(command).toEqual(validInitialize);
+	});
+
+	test("accepts only hash-bound explicit extension descriptors", () => {
+		const extension = {
+			filePath: "/tmp/empatra-omp-sessions/extensions/policy.ts",
+			id: "policy",
+			sha256: "a".repeat(64),
+		};
+		expect(parseEmpatraHostCommand(JSON.stringify({ ...validInitialize, extensions: [extension] }))).toEqual({
+			...validInitialize,
+			extensions: [extension],
+		});
+		expect(() =>
+			parseEmpatraHostCommand(
+				JSON.stringify({ ...validInitialize, extensions: [{ ...extension, sha256: "A".repeat(64) }] }),
+			),
+		).toThrow("extensions contains an invalid extension");
+		expect(() =>
+			parseEmpatraHostCommand(
+				JSON.stringify({ ...validInitialize, extensions: [{ ...extension, filePath: "relative.ts" }] }),
+			),
+		).toThrow("extension.filePath must be absolute");
+		expect(() =>
+			parseEmpatraHostCommand(
+				JSON.stringify({
+					...validInitialize,
+					extensions: Array.from({ length: 33 }, (_, index) => ({ ...extension, id: `extension-${index}` })),
+				}),
+			),
+		).toThrow("host_initialize is invalid");
 	});
 
 	test("rejects remote gateways, duplicate models, and excess fields", () => {

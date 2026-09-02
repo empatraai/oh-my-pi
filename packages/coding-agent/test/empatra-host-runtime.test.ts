@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -290,6 +291,90 @@ await new Promise(() => {});`,
 		]);
 		expect(received[0]?.skills[0]?.filePath).toBe(path.join(await realpath(skillRoot), "SKILL.md"));
 		await runtime.dispose();
+	});
+
+	test("passes only digest-verified private extensions into restricted sessions", async () => {
+		const host = await temporaryHost();
+		const extensionPath = path.join(host.sessions, "runtime", "extensions", "policy.ts");
+		await mkdir(path.dirname(extensionPath), { recursive: true });
+		await writeFile(extensionPath, "export default () => {};\n", "utf8");
+		const extensionBytes = await Bun.file(extensionPath).arrayBuffer();
+		const extensionSha256 = createHash("sha256").update(Buffer.from(extensionBytes)).digest("hex");
+		const received: EmpatraHostSessionFactoryOptions[] = [];
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async input => {
+				received.push(input);
+				return new FakeSession();
+			},
+		});
+		await runtime.initialize({
+			...initializeCommand(host.workspace, host.sessions),
+			extensions: [{ filePath: extensionPath, id: "policy", sha256: extensionSha256 }],
+		});
+		await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-extension-session",
+			modelId: "managed-model",
+			operationId: "operation-extension-session",
+			systemPrompt: "Empatra system prompt",
+			type: "thread_create",
+		});
+		expect(received[0]?.extensionPaths).toEqual([await realpath(extensionPath)]);
+		await runtime.dispose();
+	});
+
+	test("loads explicit extensions without exposing extension tools", async () => {
+		const host = await temporaryHost();
+		const extensionPath = path.join(host.sessions, "runtime", "extensions", "lifecycle.ts");
+		const markerPath = path.join(host.sessions, "runtime", "lifecycle.marker");
+		await mkdir(path.dirname(extensionPath), { recursive: true });
+		await writeFile(
+			extensionPath,
+			`export default async pi => { await Bun.write(${JSON.stringify(markerPath)}, "loaded"); pi.registerTool({ name: "should_not_be_exposed", label: "hidden", description: "hidden", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "no" }] }) }); };\n`,
+			"utf8",
+		);
+		const extensionSha256 = createHash("sha256")
+			.update(await readFile(extensionPath))
+			.digest("hex");
+		const runtime = new EmpatraHostAgentRuntime();
+		await runtime.initialize({
+			...initializeCommand(host.workspace, host.sessions),
+			extensions: [{ filePath: extensionPath, id: "lifecycle", sha256: extensionSha256 }],
+		});
+		await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-lifecycle-session",
+			modelId: "managed-model",
+			operationId: "operation-lifecycle-session",
+			systemPrompt: "Empatra system prompt",
+			type: "thread_create",
+		});
+		expect(await readFile(markerPath, "utf8")).toBe("loaded");
+		await runtime.dispose();
+	});
+
+	test("rejects extension modules outside private storage or with a wrong digest", async () => {
+		const host = await temporaryHost();
+		const outsidePath = path.join(host.root, "outside.ts");
+		await writeFile(outsidePath, "export default () => {};\n", "utf8");
+		const runtime = new EmpatraHostAgentRuntime({ sessionFactory: async () => new FakeSession() });
+		await expect(
+			runtime.initialize({
+				...initializeCommand(host.workspace, host.sessions),
+				extensions: [{ filePath: outsidePath, id: "outside", sha256: "a".repeat(64) }],
+			}),
+		).rejects.toThrow("extension module is unavailable or invalid");
+
+		const privatePath = path.join(host.sessions, "runtime", "extensions", "wrong.ts");
+		await mkdir(path.dirname(privatePath), { recursive: true });
+		await writeFile(privatePath, "export default () => {};\n", "utf8");
+		const retry = new EmpatraHostAgentRuntime({ sessionFactory: async () => new FakeSession() });
+		await expect(
+			retry.initialize({
+				...initializeCommand(host.workspace, host.sessions),
+				extensions: [{ filePath: privatePath, id: "wrong", sha256: "b".repeat(64) }],
+			}),
+		).rejects.toThrow("extension module is unavailable or invalid");
 	});
 
 	test("applies a host approval override only to its turn and restores the thread default", async () => {
