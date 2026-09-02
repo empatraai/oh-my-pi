@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+	createEmpatraHostOutboundWriter,
 	type EmpatraHostEvent,
 	type EmpatraHostInitializeCommand,
 	EmpatraHostProtocolError,
@@ -131,6 +132,28 @@ function runtime(overrides: Partial<EmpatraHostRuntime> = {}): EmpatraHostRuntim
 }
 
 describe("Empatra host protocol server", () => {
+	test("bounds serialized stdout while the controller is back-pressured", async () => {
+		const release = Promise.withResolvers<void>();
+		const delivered: string[] = [];
+		const writer = createEmpatraHostOutboundWriter(
+			async frame => {
+				delivered.push(frame);
+				await release.promise;
+			},
+			{ maxBytes: 8, maxFrames: 2 },
+		);
+
+		const first = writer("1234");
+		const second = writer("56");
+		await expect(writer("78")).rejects.toMatchObject({ code: "event_backpressure" });
+		release.resolve();
+		await Promise.all([first, second]);
+		expect(delivered).toEqual(["1234", "56"]);
+
+		await writer("78");
+		expect(delivered).toEqual(["1234", "56", "78"]);
+	});
+
 	test("writes turn acceptance before the first event and bounds the activation barrier", async () => {
 		let sink: ((event: EmpatraHostEvent) => Promise<void>) | undefined;
 		let deliveries: PromiseSettledResult<void>[] = [];

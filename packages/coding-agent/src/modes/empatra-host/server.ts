@@ -54,6 +54,69 @@ export interface EmpatraHostServerOptions {
 }
 
 const MAX_ACTIVATION_BARRIER_BYTES = 2 * EMPATRA_HOST_MAX_FRAME_BYTES;
+/**
+ * A controller can keep stdout blocked (for example while its IPC pipe is
+ * back-pressured).  Keep the host's serialized write queue bounded so events
+ * cannot accumulate unbounded promises and frame strings in memory.
+ */
+export const EMPATRA_HOST_MAX_OUTBOUND_QUEUE_BYTES = 16 * EMPATRA_HOST_MAX_FRAME_BYTES;
+export const EMPATRA_HOST_MAX_OUTBOUND_QUEUE_FRAMES = 512;
+
+export interface EmpatraHostOutboundWriterLimits {
+	maxBytes?: number;
+	maxFrames?: number;
+}
+
+/**
+ * Serializes host output while reserving queue capacity before scheduling a
+ * write.  Capacity is released only after the underlying write settles,
+ * which makes the bound meaningful even when stdout is slow or blocked.
+ */
+export interface EmpatraHostOutboundWriter {
+	(frame: string): Promise<void>;
+	drain(): Promise<void>;
+}
+
+export function createEmpatraHostOutboundWriter(
+	write: (frame: string) => Promise<void>,
+	limits: EmpatraHostOutboundWriterLimits = {},
+): EmpatraHostOutboundWriter {
+	const maxBytes = limits.maxBytes ?? EMPATRA_HOST_MAX_OUTBOUND_QUEUE_BYTES;
+	const maxFrames = limits.maxFrames ?? EMPATRA_HOST_MAX_OUTBOUND_QUEUE_FRAMES;
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
+		throw new RangeError("maxBytes must be a positive safe integer");
+	if (!Number.isSafeInteger(maxFrames) || maxFrames < 1) {
+		throw new RangeError("maxFrames must be a positive safe integer");
+	}
+	const encoder = new TextEncoder();
+	let queuedBytes = 0;
+	let queuedFrames = 0;
+	let writeTail = Promise.resolve();
+
+	const writer = ((frame: string): Promise<void> => {
+		const frameBytes = encoder.encode(frame).byteLength;
+		if (frameBytes > maxBytes || queuedBytes + frameBytes > maxBytes || queuedFrames >= maxFrames) {
+			return Promise.reject(
+				new EmpatraHostProtocolError(
+					"event_backpressure",
+					"OMP host output queue exceeded its byte or frame limit",
+				),
+			);
+		}
+		queuedBytes += frameBytes;
+		queuedFrames += 1;
+		const next = writeTail.then(() => write(frame));
+		writeTail = next
+			.catch(() => undefined)
+			.finally(() => {
+				queuedBytes -= frameBytes;
+				queuedFrames -= 1;
+			});
+		return next;
+	}) as EmpatraHostOutboundWriter;
+	writer.drain = () => writeTail;
+	return writer;
+}
 
 interface ActivationBarrier {
 	bytes: number;
@@ -116,13 +179,7 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 	const activationBarriers = new Map<string, ActivationBarrier>();
 	let initialized = false;
 	let stopped = false;
-	let writeTail = Promise.resolve();
-
-	const writeSerialized = (frame: string): Promise<void> => {
-		const next = writeTail.then(() => options.write(frame));
-		writeTail = next.catch(() => undefined);
-		return next;
-	};
+	const writeSerialized = createEmpatraHostOutboundWriter(options.write);
 	const writeError = (id: string | null, error: unknown) => {
 		const failure = projectEmpatraHostFailure(error);
 		return writeSerialized(
@@ -357,6 +414,6 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 	} finally {
 		await Promise.allSettled(inflight.values());
 		if (!stopped) await options.runtime.dispose();
-		await writeTail;
+		await writeSerialized.drain();
 	}
 }
