@@ -1,5 +1,6 @@
 import { EmpatraHostProtocolError } from "./errors";
 import { EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY } from "./protocol";
+import { randomUUID } from "node:crypto";
 
 /**
  * Reserved capability for the future main-owned execution broker.
@@ -93,12 +94,34 @@ export interface EmpatraHostExecutionBrokerRequest extends EmpatraHostExecutionS
 	type: "execution_broker_request";
 }
 
+/**
+ * Sidecar-to-main request carried as a host event.  It intentionally uses the
+ * normal turn identity and sequence so the controller can reject requests
+ * from a stale process generation before they reach an executor.
+ */
+export interface EmpatraHostExecutionBrokerRequestEvent extends EmpatraHostExecutionScope {
+	event: "execution_broker_request";
+	id: string;
+	request: EmpatraHostExecutionRequest;
+	sequence: number;
+	type: "host_event";
+}
+
 export interface EmpatraHostExecutionBrokerResponse extends EmpatraHostExecutionScope {
 	error?: Readonly<{ code: string; message: string }>;
 	id: string;
 	operation: EmpatraHostExecutionOperation;
 	result?: EmpatraHostExecutionResult;
 	type: "execution_broker_response";
+}
+
+/** Main-to-sidecar response command for an execution broker request. */
+export type EmpatraHostExecutionBrokerResponseCommand = EmpatraHostExecutionBrokerResponse;
+
+export interface EmpatraHostExecutionBrokerTransport {
+	readonly broker: EmpatraHostExecutionBroker;
+	handleResponse(response: EmpatraHostExecutionBrokerResponse): void;
+	dispose(): void;
 }
 
 export interface EmpatraHostExecutionBroker {
@@ -110,6 +133,8 @@ export type EmpatraHostExecutionExecutor = (
 	request: EmpatraHostExecutionRequest,
 	signal?: AbortSignal,
 ) => Promise<EmpatraHostExecutionResult>;
+
+export type EmpatraHostExecutionRequestEmitter = (event: EmpatraHostExecutionBrokerRequestEvent) => Promise<void>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -295,6 +320,39 @@ export function parseEmpatraHostExecutionBrokerRequest(value: unknown): EmpatraH
 	};
 }
 
+/** Parse a broker request emitted on the normal, ordered host event channel. */
+export function parseEmpatraHostExecutionBrokerRequestEvent(value: unknown): EmpatraHostExecutionBrokerRequestEvent {
+	if (
+		!isRecord(value) ||
+		!hasOnlyKeys(value, ["event", "generation", "id", "request", "sequence", "threadId", "turnId", "type"]) ||
+		value.type !== "host_event" ||
+		value.event !== "execution_broker_request"
+	) {
+		throw new EmpatraHostProtocolError("execution_request_invalid", "execution broker event is invalid");
+	}
+	const outer = scope(value);
+	const sequence = boundedInteger(value.sequence, "sequence", 1, Number.MAX_SAFE_INTEGER);
+	const request = parseEmpatraHostExecutionRequest(value.request);
+	if (
+		request.generation !== outer.generation ||
+		request.threadId !== outer.threadId ||
+		request.turnId !== outer.turnId
+	) {
+		throw new EmpatraHostProtocolError(
+			"identity_mismatch",
+			"execution broker event scope does not match its request",
+		);
+	}
+	return {
+		...outer,
+		event: "execution_broker_request",
+		id: identifier(value.id, "id"),
+		request,
+		sequence,
+		type: "host_event",
+	};
+}
+
 /** Parse a main-owned response and enforce correlation operation identity. */
 export function parseEmpatraHostExecutionBrokerResponse(value: unknown): EmpatraHostExecutionBrokerResponse {
 	if (
@@ -327,6 +385,125 @@ export function parseEmpatraHostExecutionBrokerResponse(value: unknown): Empatra
 		operation,
 		result: validateResult(value.result as EmpatraHostExecutionResult, operation),
 		type: "execution_broker_response",
+	};
+}
+
+/**
+ * Create the sidecar half of the main-owned execution broker.
+ *
+ * The executor is deliberately represented by an ordered host event and a
+ * correlated command response.  No process, filesystem, environment, or
+ * credential access is performed in this module.  The optional sequence
+ * allocator lets the host runtime share its per-turn event ordering; callers
+ * that do not have one get a deterministic per-turn sequence for isolated
+ * use and tests.
+ */
+export function createEmpatraHostExecutionBrokerTransport(
+	options: Readonly<{
+		emitRequest: EmpatraHostExecutionRequestEmitter;
+		nextSequence?: (scope: EmpatraHostExecutionScope) => number;
+		requestTimeoutMs?: number;
+	}>,
+): EmpatraHostExecutionBrokerTransport {
+	const timeoutMs = options.requestTimeoutMs ?? 30_000;
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > EMPATRA_HOST_MAX_EXECUTION_TIMEOUT_MS) {
+		throw new RangeError("requestTimeoutMs must be between 1 and the execution timeout limit");
+	}
+	const pending = new Map<
+		string,
+		{
+			reject: (error: unknown) => void;
+			resolve: (result: EmpatraHostExecutionResult) => void;
+			scope: EmpatraHostExecutionRequest;
+			timeout: ReturnType<typeof setTimeout>;
+		}
+	>();
+	const sequenceByTurn = new Map<string, number>();
+	const nextSequence = (scope: EmpatraHostExecutionScope): number => {
+		if (options.nextSequence) {
+			const sequence = options.nextSequence(scope);
+			if (!Number.isSafeInteger(sequence) || sequence < 1) {
+				throw new EmpatraHostProtocolError("execution_request_invalid", "execution event sequence is invalid");
+			}
+			return sequence;
+		}
+		const key = `${scope.threadId}\u0000${scope.turnId}`;
+		const sequence = (sequenceByTurn.get(key) ?? 0) + 1;
+		sequenceByTurn.set(key, sequence);
+		return sequence;
+	};
+	const broker: EmpatraHostExecutionBroker = {
+		capability: EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY,
+		execute: async (input, signal) => {
+			const request = parseEmpatraHostExecutionRequest(input);
+			if (signal?.aborted) throw new DOMException("Execution broker request aborted", "AbortError");
+			const id = randomUUID();
+			const event: EmpatraHostExecutionBrokerRequestEvent = {
+				event: "execution_broker_request",
+				generation: request.generation,
+				id,
+				request,
+				sequence: nextSequence(request),
+				threadId: request.threadId,
+				turnId: request.turnId,
+				type: "host_event",
+			};
+			return await new Promise<EmpatraHostExecutionResult>((resolve, reject) => {
+				const timeout = setTimeout(() => {
+					pending.delete(id);
+					reject(new EmpatraHostProtocolError("execution_broker_timeout", "Execution broker response timed out"));
+				}, timeoutMs);
+				const abort = () => {
+					if (!pending.delete(id)) return;
+					clearTimeout(timeout);
+					reject(new DOMException("Execution broker request aborted", "AbortError"));
+				};
+				pending.set(id, { reject, resolve, scope: request, timeout });
+				signal?.addEventListener("abort", abort, { once: true });
+				void options.emitRequest(event).catch(error => {
+					if (!pending.delete(id)) return;
+					clearTimeout(timeout);
+					signal?.removeEventListener("abort", abort);
+					reject(error);
+				});
+			}).then(result => {
+				// The response handler cannot access the caller's AbortSignal here;
+				// cleanup is performed by the response/timeout paths above.
+				return result;
+			});
+		},
+	};
+	return {
+		broker,
+		handleResponse(response) {
+			const parsed = parseEmpatraHostExecutionBrokerResponse(response);
+			const request = pending.get(parsed.id);
+			if (!request)
+				throw new EmpatraHostProtocolError("execution_result_invalid", "Execution broker response is not pending");
+			if (
+				request.scope.generation !== parsed.generation ||
+				request.scope.threadId !== parsed.threadId ||
+				request.scope.turnId !== parsed.turnId ||
+				request.scope.operation !== parsed.operation
+			) {
+				throw new EmpatraHostProtocolError(
+					"identity_mismatch",
+					"Execution broker response scope does not match its request",
+				);
+			}
+			pending.delete(parsed.id);
+			clearTimeout(request.timeout);
+			if (parsed.error) request.reject(new EmpatraHostProtocolError(parsed.error.code, parsed.error.message));
+			else request.resolve(parsed.result as EmpatraHostExecutionResult);
+		},
+		dispose() {
+			for (const request of pending.values()) {
+				clearTimeout(request.timeout);
+				request.reject(new EmpatraHostProtocolError("host_disposed", "OMP host is shutting down"));
+			}
+			pending.clear();
+			sequenceByTurn.clear();
+		},
 	};
 }
 

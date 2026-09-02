@@ -23,6 +23,7 @@ export interface EmpatraHostRuntime {
 	getAtomicOperationStatus(
 		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
 	): Promise<unknown>;
+	handleExecutionBrokerResponse(command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void;
 	clearThreadGoal(command: Extract<EmpatraHostCommand, { type: "goal_clear" }>): Promise<unknown>;
 	compactThread(command: Extract<EmpatraHostCommand, { type: "thread_compact" }>): Promise<unknown>;
 	deleteThread(command: Extract<EmpatraHostCommand, { type: "thread_delete" }>): Promise<unknown>;
@@ -313,6 +314,8 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 				return options.runtime.handleHostToolCancel(command);
 			case "host_tool_result":
 				return options.runtime.handleHostToolResult(command);
+			case "execution_broker_response":
+				return options.runtime.handleExecutionBrokerResponse(command);
 			case "turn_start":
 				return options.runtime.startTurn(command);
 			case "turn_interrupt":
@@ -373,12 +376,17 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 				);
 				continue;
 			}
-			if (command.type === "host_tool_result" || command.type === "host_tool_cancel") {
+			if (
+				command.type === "host_tool_result" ||
+				command.type === "host_tool_cancel" ||
+				command.type === "execution_broker_response"
+			) {
 				try {
 					if (command.type === "host_tool_result") options.runtime.handleHostToolResult(command);
-					else options.runtime.handleHostToolCancel(command);
+					else if (command.type === "host_tool_cancel") options.runtime.handleHostToolCancel(command);
+					else options.runtime.handleExecutionBrokerResponse(command);
 				} catch (error) {
-					await writeError(command.id, error);
+					await writeError(command.type === "execution_broker_response" ? null : command.id, error);
 				}
 				continue;
 			}

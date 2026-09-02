@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
 	createEmpatraHostExecutionBroker,
+	createEmpatraHostExecutionBrokerTransport,
 	createFailClosedEmpatraHostExecutionBroker,
 	EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY,
 	EMPATRA_HOST_EXECUTION_OPERATIONS,
 	EmpatraHostProtocolError,
+	type EmpatraHostExecutionBrokerRequestEvent,
 	parseEmpatraHostExecutionBrokerRequest,
 	parseEmpatraHostExecutionBrokerResponse,
 	parseEmpatraHostExecutionRequest,
@@ -127,4 +129,30 @@ describe("Empatra host execution broker seam", () => {
 		}));
 		await expect(bad.execute(validRead)).rejects.toBeInstanceOf(EmpatraHostProtocolError);
 	});
+});
+
+test("dispatches a bounded broker request as an ordered host event and resolves its response", async () => {
+	let emitted: EmpatraHostExecutionBrokerRequestEvent | undefined;
+	const transport = createEmpatraHostExecutionBrokerTransport({
+		emitRequest: async event => {
+			emitted = event;
+		},
+		nextSequence: () => 7,
+	});
+	const pending = transport.broker.execute(validRead);
+	await Promise.resolve();
+	if (!emitted) throw new Error("broker event was not emitted");
+	expect(emitted.event).toBe("execution_broker_request");
+	expect(emitted.sequence).toBe(7);
+	transport.handleResponse({
+		generation: emitted.generation,
+		id: emitted.id,
+		operation: emitted.request.operation,
+		result: { operation: "filesystem.read", output: "main-owned", outputTruncated: false },
+		threadId: emitted.threadId,
+		turnId: emitted.turnId,
+		type: "execution_broker_response",
+	});
+	await expect(pending).resolves.toMatchObject({ output: "main-owned", operation: "filesystem.read" });
+	transport.dispose();
 });

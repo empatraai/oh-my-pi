@@ -86,6 +86,10 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 		this.#requireRuntime().handleHostToolResult(command);
 	}
 
+	handleExecutionBrokerResponse(command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void {
+		this.#requireRuntime().handleExecutionBrokerResponse(command);
+	}
+
 	interruptTurn(command: Extract<EmpatraHostCommand, { type: "turn_interrupt" }>): Promise<unknown> {
 		return this.#requireRuntime().interruptTurn(command);
 	}

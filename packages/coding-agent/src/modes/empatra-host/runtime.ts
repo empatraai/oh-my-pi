@@ -945,6 +945,18 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		});
 	}
 
+	/**
+	 * The desktop controller owns execution. A response is accepted only by a
+	 * future injected transport; the default runtime has no local executor and
+	 * therefore fails closed instead of interpreting the payload itself.
+	 */
+	handleExecutionBrokerResponse(_command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void {
+		throw new EmpatraHostProtocolError(
+			"execution_broker_unavailable",
+			"OMP execution broker transport is not connected",
+		);
+	}
+
 	async initialize(command: EmpatraHostInitializeCommand): Promise<unknown> {
 		if (this.#initialized) {
 			throw new EmpatraHostProtocolError("already_initialized", "Empatra host runtime is already initialized");

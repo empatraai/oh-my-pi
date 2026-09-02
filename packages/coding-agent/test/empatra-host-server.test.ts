@@ -69,6 +69,7 @@ function runtime(overrides: Partial<EmpatraHostRuntime> = {}): EmpatraHostRuntim
 		},
 		handleHostToolCancel() {},
 		handleHostToolResult() {},
+		handleExecutionBrokerResponse() {},
 		async noteInteractionActivity() {
 			return { expiresAt: 1 };
 		},
@@ -347,6 +348,36 @@ describe("Empatra host protocol server", () => {
 		);
 		expect(handledResults).toEqual(["host-call-1"]);
 		expect(frames.filter(frame => frame.type === "host_response" && frame.id === "host-call-1")).toHaveLength(0);
+	});
+
+	test("routes a typed execution broker response through the runtime boundary", async () => {
+		const handled: string[] = [];
+		const output: string[] = [];
+		await runEmpatraHostServer({
+			input: inputStream([
+				initializeCommand(),
+				{
+					generation: 1,
+					id: "execution-response-1",
+					operation: "filesystem.read",
+					result: { operation: "filesystem.read", output: "ok", outputTruncated: false },
+					threadId: "thread-execution",
+					turnId: "turn-execution",
+					type: "execution_broker_response",
+				},
+				{ id: "shutdown-execution", type: "host_shutdown" },
+			]),
+			runtime: runtime({
+				handleExecutionBrokerResponse(command) {
+					handled.push(command.id);
+				},
+			}),
+			write: async frame => {
+				output.push(frame);
+			},
+		});
+		expect(handled).toEqual(["execution-response-1"]);
+		expect(output.map(frame => JSON.parse(frame)).some(frame => frame.id === "execution-response-1")).toBe(false);
 	});
 
 	test("holds atomic turn events until the generated thread identity is accepted", async () => {
