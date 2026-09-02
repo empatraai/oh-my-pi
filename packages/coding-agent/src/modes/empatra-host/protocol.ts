@@ -35,6 +35,7 @@ import {
 
 export const EMPATRA_HOST_PROTOCOL_VERSION = 6 as const;
 export const EMPATRA_HOST_MAX_FRAME_BYTES = 1024 * 1024;
+export const EMPATRA_HOST_MAX_REASSEMBLED_FRAME_BYTES = 64 * 1024 * 1024;
 export const EMPATRA_HOST_MAX_MODELS = 1024;
 export const EMPATRA_HOST_MAX_WORKSPACE_ROOTS = 128;
 export const EMPATRA_HOST_MAX_SKILLS = 256;
@@ -80,6 +81,8 @@ export const EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY = "turn_configuration.v1
  * use a sidecar-local provider as a fallback.
  */
 export const EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY = "images.generation-v1" as const;
+/** Lossless bounded JSONL chunking for logical frames above the physical ceiling. */
+export const EMPATRA_HOST_FRAMING_CAPABILITY = "framing.chunked.v1" as const;
 /**
  * Reserved for an Electron-main-owned filesystem/process broker. It is not
  * advertised in `EMPATRA_HOST_CAPABILITIES` until a platform adapter and its
@@ -99,11 +102,12 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
 ] as const;
 export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
-export type EmpatraHostAdvertisedCapability = EmpatraHostCapability | typeof EMPATRA_HOST_SUBAGENT_CAPABILITY;
+export type EmpatraHostAdvertisedCapability = EmpatraHostCapability | typeof EMPATRA_HOST_SUBAGENT_CAPABILITY | typeof EMPATRA_HOST_FRAMING_CAPABILITY;
 const EMPATRA_HOST_CAPABILITY_SET = new Set<string>(EMPATRA_HOST_CAPABILITIES);
 const EMPATRA_HOST_ADVERTISED_CAPABILITY_SET = new Set<string>([
 	...EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
+	EMPATRA_HOST_FRAMING_CAPABILITY,
 ]);
 
 const textEncoder = new TextEncoder();
@@ -730,6 +734,12 @@ export interface EmpatraHostErrorResponse {
 }
 
 export type EmpatraHostResponse = EmpatraHostErrorResponse | EmpatraHostSuccessResponse;
+export type EmpatraHostFrame =
+	| EmpatraHostEvent
+	| EmpatraHostReadyFrame
+	| EmpatraHostResponse
+	| EmpatraHostToolOutboundFrame
+	| EmpatraHostSubagentResponseCommand;
 
 export type EmpatraHostAtomicOperationStatus = "accepted" | "completed" | "dispatching" | "missing";
 
@@ -846,7 +856,7 @@ function parseEmpatraHostAdvertisedCapability(value: unknown): EmpatraHostAdvert
  * unknown names and duplicate claims fail closed.
  */
 export function parseEmpatraHostCapabilities(value: unknown): readonly EmpatraHostAdvertisedCapability[] {
-	if (!Array.isArray(value) || value.length > EMPATRA_HOST_CAPABILITIES.length + 1) {
+	if (!Array.isArray(value) || value.length > EMPATRA_HOST_CAPABILITIES.length + 2) {
 		throw new EmpatraHostProtocolError("invalid_request", "host capabilities are invalid");
 	}
 	const capabilities = value.map(parseEmpatraHostAdvertisedCapability);
@@ -1815,12 +1825,8 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 }
 
 export function serializeEmpatraHostFrame(
-	frame:
-		| EmpatraHostEvent
-		| EmpatraHostReadyFrame
-		| EmpatraHostResponse
-		| EmpatraHostToolOutboundFrame
-		| EmpatraHostSubagentResponseCommand,
+	frame: EmpatraHostFrame,
+	options: { allowChunking?: boolean } = {},
 ): string {
 	if (frame.type === "host_ready") {
 		if (
@@ -1866,7 +1872,7 @@ export function serializeEmpatraHostFrame(
 		planProposalField(frame.summary, "summary", EMPATRA_HOST_MAX_PLAN_SUMMARY_BYTES);
 	}
 	const serialized = JSON.stringify(frame);
-	if (textEncoder.encode(serialized).byteLength > EMPATRA_HOST_MAX_FRAME_BYTES) {
+	if (!options.allowChunking && textEncoder.encode(serialized).byteLength > EMPATRA_HOST_MAX_FRAME_BYTES) {
 		throw new EmpatraHostProtocolError("frame_too_large", "Host response exceeds the physical frame limit");
 	}
 	return `${serialized}\n`;

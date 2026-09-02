@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import queue
@@ -119,6 +120,8 @@ _TODO_STATUS_VALUES = frozenset({"pending", "in_progress", "completed", "abandon
 _MAX_RPC_FRAME_BYTES = 1024 * 1024
 _MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024
 _RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024
+_RPC_CHUNK_TIMEOUT_SECONDS = 30.0
+_RPC_CHUNK_DIGEST_LENGTH = 64
 _RPC_MESSAGES_PAGE_BUSY_ERROR = "Cannot page messages while the session is changing"
 _RPC_MESSAGES_PAGE_STALE_ERROR = "RPC message cursor is stale"
 _RPC_MESSAGES_PAGE_FALLBACK_CODES = frozenset({"session_busy", "stale_cursor"})
@@ -129,14 +132,43 @@ class _PendingRpcChunks:
     chunk_id: str
     count: int
     byte_length: int
+    digest: str
     next_index: int = 0
     chunks: list[bytes] = field(default_factory=list)
     received_bytes: int = 0
 
 
 class _RpcFrameDecoder:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = _RPC_CHUNK_TIMEOUT_SECONDS,
+        on_timeout: Callable[[], None] | None = None,
+    ) -> None:
         self._pending: _PendingRpcChunks | None = None
+        self._timeout_seconds = timeout_seconds
+        self._on_timeout = on_timeout or (lambda: None)
+        self._timer: threading.Timer | None = None
+
+    def _clear_pending(self) -> None:
+        self._pending = None
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _arm_timeout(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+        self._timer = threading.Timer(self._timeout_seconds, self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _expire(self) -> None:
+        if self._pending is None:
+            return
+        self._pending = None
+        self._timer = None
+        self._on_timeout()
 
     def push(self, value: object) -> JsonObject | None:
         if not isinstance(value, dict) or value.get("type") != "rpc_chunk":
@@ -150,6 +182,7 @@ class _RpcFrameDecoder:
         index = value.get("index")
         count = value.get("count")
         byte_length = value.get("byteLength")
+        digest = value.get("digest")
         data = value.get("data")
         max_chunk_count = (
             _MAX_RPC_REASSEMBLED_BYTES + _RPC_CHUNK_PAYLOAD_BYTES - 1
@@ -170,6 +203,9 @@ class _RpcFrameDecoder:
             or index >= count
             or byte_length < _MAX_RPC_FRAME_BYTES
             or byte_length > _MAX_RPC_REASSEMBLED_BYTES
+            or not isinstance(digest, str)
+            or len(digest) != _RPC_CHUNK_DIGEST_LENGTH
+            or any(character not in "0123456789abcdef" for character in digest)
             or not isinstance(data, str)
             or not data
         ):
@@ -186,12 +222,14 @@ class _RpcFrameDecoder:
         if self._pending is None:
             if index != 0:
                 raise RpcError("RPC chunk sequence must start at index 0")
-            self._pending = _PendingRpcChunks(chunk_id, count, byte_length)
+            self._pending = _PendingRpcChunks(chunk_id, count, byte_length, digest)
+            self._arm_timeout()
         pending = self._pending
         if (
             pending.chunk_id != chunk_id
             or pending.count != count
             or pending.byte_length != byte_length
+            or pending.digest != digest
             or pending.next_index != index
         ):
             raise RpcError("RPC chunk sequence mismatch")
@@ -205,9 +243,13 @@ class _RpcFrameDecoder:
         if pending.received_bytes != pending.byte_length:
             raise RpcError("RPC chunk sequence length mismatch")
 
-        self._pending = None
+        assembled = b"".join(pending.chunks)
+        if hashlib.sha256(assembled).hexdigest() != pending.digest:
+            self._clear_pending()
+            raise RpcError("RPC chunk digest mismatch")
+        self._clear_pending()
         try:
-            decoded = b"".join(pending.chunks).decode("utf-8")
+            decoded = assembled.decode("utf-8")
             frame = json.loads(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RpcError("Failed to decode reassembled RPC frame") from exc
@@ -650,6 +692,8 @@ class RpcClient:
             ready_event is not None
             and ready_event.supported_protocol_versions is not None
             and 2 in ready_event.supported_protocol_versions
+            and ready_event.capabilities is not None
+            and "rpc_chunking.v1" in ready_event.capabilities
             and ready_event.max_frame_bytes == _MAX_RPC_FRAME_BYTES
             and ready_event.max_reassembled_frame_bytes == _MAX_RPC_REASSEMBLED_BYTES
         ):

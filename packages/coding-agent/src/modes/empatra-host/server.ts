@@ -14,6 +14,7 @@ import {
 	projectEmpatraHostFailure,
 	serializeEmpatraHostFrame,
 } from "./protocol";
+import { encodeEmpatraHostFrames, EmpatraHostFrameDecoder } from "./frame";
 import type {
 	EmpatraHostSubagentCloseCommand,
 	EmpatraHostSubagentInterruptCommand,
@@ -148,7 +149,7 @@ interface ActivationBarrier {
 	bytes: number;
 	key: string;
 	pending: Array<{
-		frame: string;
+		frame: readonly string[];
 		reject: (error: unknown) => void;
 		resolve: () => void;
 	}>;
@@ -200,41 +201,42 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 	if (!Number.isSafeInteger(maxInflightCommands) || maxInflightCommands < 1 || maxInflightCommands > 1024) {
 		throw new RangeError("maxInflightCommands must be between 1 and 1024");
 	}
-	const decoder = new TextDecoder("utf-8", { fatal: true });
+	const frameDecoder = new EmpatraHostFrameDecoder();
 	const inflight = new Map<string, Promise<void>>();
 	const activationBarriers = new Map<string, ActivationBarrier>();
 	let initialized = false;
 	let stopped = false;
 	const writeSerialized = createEmpatraHostOutboundWriter(options.write);
-	const advertisedCapabilities = options.runtime.getAdvertisedCapabilities?.() ?? EMPATRA_HOST_CAPABILITIES;
+	const advertisedCapabilities = [...new Set(options.runtime.getAdvertisedCapabilities?.() ?? EMPATRA_HOST_CAPABILITIES)];
+	let chunkCounter = 0;
+	const writeFrame = (frame: Parameters<typeof serializeEmpatraHostFrame>[0]): Promise<void> => {
+		const lines = encodeEmpatraHostFrames(frame, `host-${++chunkCounter}`);
+		return lines.reduce((tail, line) => tail.then(() => writeSerialized(line)), Promise.resolve());
+	};
 	const writeError = (id: string | null, error: unknown) => {
 		const failure = projectEmpatraHostFailure(error);
-		return writeSerialized(
-			serializeEmpatraHostFrame({
+		return writeFrame({
 				code: failure.code,
 				error: failure.message,
 				id,
 				success: false,
 				type: "host_response",
-			}),
-		);
+		});
 	};
 	const writeSuccess = (id: string, data?: unknown) => {
-		return writeSerialized(
-			serializeEmpatraHostFrame({
+		return writeFrame({
 				...(data === undefined ? {} : { data }),
 				id,
 				success: true,
 				type: "host_response",
-			}),
-		);
+		});
 	};
-	const writeTurnFrame = (frame: string, threadId: string, turnId: string): Promise<void> => {
+	const writeTurnFrame = (frames: readonly string[], threadId: string, turnId: string): Promise<void> => {
 		const barrier = [...activationBarriers.values()].find(
 			candidate => candidate.turnId === turnId && (candidate.threadId === null || candidate.threadId === threadId),
 		);
-		if (!barrier) return writeSerialized(frame);
-		const frameBytes = new TextEncoder().encode(frame).byteLength;
+		if (!barrier) return frames.reduce((tail, frame) => tail.then(() => writeSerialized(frame)), Promise.resolve());
+		const frameBytes = frames.reduce((bytes, frame) => bytes + new TextEncoder().encode(frame).byteLength, 0);
 		if (barrier.bytes + frameBytes > MAX_ACTIVATION_BARRIER_BYTES) {
 			return Promise.reject(
 				new EmpatraHostProtocolError("event_backpressure", "Turn activation barrier exceeded its byte limit"),
@@ -242,20 +244,20 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 		}
 		barrier.bytes += frameBytes;
 		return new Promise<void>((resolve, reject) => {
-			barrier.pending.push({ frame, reject, resolve });
+			barrier.pending.push({ frame: frames, reject, resolve });
 		});
 	};
 	options.runtime.setEventSink(event => {
 		try {
-			const frame = serializeEmpatraHostFrame(event);
-			return writeTurnFrame(frame, event.threadId, event.turnId);
+			const frames = encodeEmpatraHostFrames(event, `host-${++chunkCounter}`);
+			return writeTurnFrame(frames, event.threadId, event.turnId);
 		} catch (error) {
 			return writeError(null, error);
 		}
 	});
 	options.runtime.setHostToolSink(frame => {
 		try {
-			return writeTurnFrame(serializeEmpatraHostFrame(frame), frame.threadId, frame.turnId);
+			return writeTurnFrame(encodeEmpatraHostFrames(frame, `host-${++chunkCounter}`), frame.threadId, frame.turnId);
 		} catch (error) {
 			return writeError(null, error);
 		}
@@ -264,7 +266,7 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 		activationBarriers.delete(barrier.key);
 		for (const pending of barrier.pending) {
 			try {
-				await writeSerialized(pending.frame);
+				for (const frame of pending.frame) await writeSerialized(frame);
 				pending.resolve();
 			} catch (error) {
 				pending.reject(error);
@@ -385,9 +387,11 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 	try {
 		for await (const line of readLines(options.input, undefined, EMPATRA_HOST_MAX_FRAME_BYTES)) {
 			if (stopped) break;
+			const decodedFrame = frameDecoder.push(line);
+			if (decodedFrame === undefined) continue;
 			let command: EmpatraHostCommand;
 			try {
-				command = parseEmpatraHostCommand(decoder.decode(line).trim());
+				command = parseEmpatraHostCommand(JSON.stringify(decodedFrame));
 			} catch (error) {
 				await writeError(null, error);
 				continue;

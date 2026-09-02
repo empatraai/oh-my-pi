@@ -175,6 +175,8 @@ function supportsRpcProtocolV2(value: Record<string, unknown>): boolean {
 		value.type === "ready" &&
 		Array.isArray(value.supportedProtocolVersions) &&
 		value.supportedProtocolVersions.includes(2) &&
+		Array.isArray(value.capabilities) &&
+		value.capabilities.includes("rpc_chunking.v1") &&
 		value.maxFrameBytes === MAX_RPC_FRAME_BYTES &&
 		value.maxReassembledFrameBytes === MAX_RPC_REASSEMBLED_BYTES
 	);

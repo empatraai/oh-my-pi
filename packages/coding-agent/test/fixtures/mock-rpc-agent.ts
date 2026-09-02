@@ -14,6 +14,8 @@ if (Bun.env.MOCK_RPC_IGNORE_SIGTERM === "1") {
 	process.on("SIGTERM", () => {});
 }
 
+import { createHash } from "node:crypto";
+
 const supportsProtocolV2 = Bun.env.MOCK_RPC_V2 === "1";
 const legacyState = {
 	thinkingLevel: "off",
@@ -51,6 +53,7 @@ process.stdout.write(
 					supportedProtocolVersions: [1, 2],
 					maxFrameBytes: 1024 * 1024,
 					maxReassembledFrameBytes: 64 * 1024 * 1024,
+					capabilities: ["rpc_chunking.v1"],
 				}
 			: { type: "ready" },
 	)}\n`,
@@ -64,14 +67,17 @@ function writeFrame(frame: Record<string, unknown>): void {
 	}
 	const chunkBytes = 256 * 1024;
 	const count = Math.ceil(logical.byteLength / chunkBytes);
+	const digest = createHash("sha256").update(logical).digest("hex");
 	for (let index = 0; index < count; index++) {
 		process.stdout.write(
 			`${JSON.stringify({
-				type: "rpc_chunk",
+				 type: "rpc_chunk",
+				 version: 1,
 				chunkId: "mock-rpc-v2",
 				index,
 				count,
-				byteLength: logical.byteLength,
+				 byteLength: logical.byteLength,
+				digest,
 				data: logical.subarray(index * chunkBytes, (index + 1) * chunkBytes).toString("base64"),
 			})}\n`,
 		);

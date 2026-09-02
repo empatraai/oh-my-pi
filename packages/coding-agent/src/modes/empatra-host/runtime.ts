@@ -76,6 +76,7 @@ import type {
 } from "./protocol";
 import {
 	EMPATRA_HOST_CAPABILITIES,
+	EMPATRA_HOST_FRAMING_CAPABILITY,
 	EMPATRA_HOST_MAX_ASSISTANT_MESSAGES_PER_TURN,
 	EMPATRA_HOST_MAX_CONTENT_INDEX,
 	EMPATRA_HOST_MAX_PLAN_CONTENT_BYTES,
@@ -999,8 +1000,8 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 
 	getAdvertisedCapabilities() {
 		return this.#subagentController || this.#subagentRpcTransport
-			? [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY]
-			: EMPATRA_HOST_CAPABILITIES;
+			? [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY, EMPATRA_HOST_FRAMING_CAPABILITY]
+			: [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_FRAMING_CAPABILITY];
 	}
 
 	spawnSubagent(command: EmpatraHostSubagentSpawnCommand): Promise<unknown> {

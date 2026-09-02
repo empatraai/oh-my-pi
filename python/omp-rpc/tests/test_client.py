@@ -523,16 +523,19 @@ V2_MESSAGES_SERVER = textwrap.dedent(
             return
         chunk_size = 256 * 1024
         count = (len(encoded) + chunk_size - 1) // chunk_size
+        digest = __import__("hashlib").sha256(encoded).hexdigest()
         for index in range(count):
             chunk = encoded[index * chunk_size : (index + 1) * chunk_size]
             print(
                 json.dumps(
                     {
                         "type": "rpc_chunk",
+                        "version": 1,
                         "chunkId": "test-page",
                         "index": index,
                         "count": count,
                         "byteLength": len(encoded),
+                        "digest": digest,
                         "data": base64.b64encode(chunk).decode("ascii"),
                     },
                     separators=(",", ":"),
@@ -546,6 +549,7 @@ V2_MESSAGES_SERVER = textwrap.dedent(
                 "type": "ready",
                 "protocolVersion": 1,
                 "supportedProtocolVersions": [1, 2],
+                "capabilities": ["rpc_chunking.v1"],
                 "maxFrameBytes": 1024 * 1024,
                 "maxReassembledFrameBytes": 64 * 1024 * 1024,
             }
@@ -906,10 +910,12 @@ class RpcClientTests(unittest.TestCase):
             decoded = decoder.push(
                 {
                     "type": "rpc_chunk",
+                    "version": 1,
                     "chunkId": "exact-boundary",
                     "index": index,
                     "count": count,
                     "byteLength": len(encoded),
+                    "digest": __import__("hashlib").sha256(encoded).hexdigest(),
                     "data": base64.b64encode(chunk).decode("ascii"),
                 }
             )

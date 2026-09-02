@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { RpcChunkFrame } from "./rpc-types";
 
@@ -8,6 +9,8 @@ export const MAX_RPC_FRAME_BYTES = 1024 * 1024;
 export const MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024;
 
 const RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024;
+const RPC_CHUNK_DIGEST = /^[a-f0-9]{64}$/u;
+export const RPC_CHUNK_TIMEOUT_MS = 30_000;
 
 export type RpcProtocolVersion = 1 | 2;
 
@@ -98,14 +101,17 @@ function* encodeChunkedRpcFrames(frame: object, json: string, chunkId: string): 
 		return;
 	}
 	const bytes = Buffer.from(json, "utf8");
+	const digest = createHash("sha256").update(bytes).digest("hex");
 	const count = Math.ceil(byteLength / RPC_CHUNK_PAYLOAD_BYTES);
 	for (let index = 0; index < count; index++) {
 		const chunk: RpcChunkFrame = {
 			type: "rpc_chunk",
+			version: 1,
 			chunkId,
 			index,
 			count,
 			byteLength,
+			digest,
 			data: bytes
 				.subarray(index * RPC_CHUNK_PAYLOAD_BYTES, (index + 1) * RPC_CHUNK_PAYLOAD_BYTES)
 				.toString("base64"),
@@ -136,6 +142,31 @@ function decodeBase64(data: unknown): Buffer {
 /** Reassemble protocol v2 chunk frames after each JSONL line has been parsed. */
 export class RpcFrameDecoder {
 	#pending?: PendingRpcChunks;
+	#timeout?: ReturnType<typeof setTimeout>;
+	readonly #timeoutMs: number;
+	readonly #onTimeout: () => void;
+
+	constructor(options: { timeoutMs?: number; onTimeout?: () => void } = {}) {
+		this.#timeoutMs = options.timeoutMs ?? RPC_CHUNK_TIMEOUT_MS;
+		if (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs < 1) throw new RangeError("timeoutMs must be a positive integer");
+		this.#onTimeout = options.onTimeout ?? (() => undefined);
+	}
+
+	#armTimeout(): void {
+		clearTimeout(this.#timeout);
+		this.#timeout = setTimeout(() => {
+			this.#pending = undefined;
+			this.#timeout = undefined;
+			this.#onTimeout();
+		}, this.#timeoutMs);
+		this.#timeout.unref?.();
+	}
+
+	#clearPending(): void {
+		this.#pending = undefined;
+		clearTimeout(this.#timeout);
+		this.#timeout = undefined;
+	}
 
 	push(value: unknown): object | undefined {
 		if (!isRpcChunkFrame(value)) {
@@ -143,8 +174,9 @@ export class RpcFrameDecoder {
 			if (!isRecord(value)) throw new Error("rpc frame must be an object");
 			return value;
 		}
-		const { chunkId, index, count, byteLength } = value;
+		const { version, chunkId, index, count, byteLength, digest } = value;
 		if (
+			version !== 1 ||
 			typeof chunkId !== "string" ||
 			chunkId.length === 0 ||
 			chunkId.length > 128 ||
@@ -156,7 +188,9 @@ export class RpcFrameDecoder {
 			count > Math.ceil(MAX_RPC_REASSEMBLED_BYTES / RPC_CHUNK_PAYLOAD_BYTES) ||
 			index >= count ||
 			byteLength < MAX_RPC_FRAME_BYTES ||
-			byteLength > MAX_RPC_REASSEMBLED_BYTES
+			byteLength > MAX_RPC_REASSEMBLED_BYTES ||
+			typeof digest !== "string" ||
+			!RPC_CHUNK_DIGEST.test(digest)
 		)
 			throw new Error("invalid rpc chunk metadata");
 		const bytes = decodeBase64(value.data);
@@ -165,6 +199,7 @@ export class RpcFrameDecoder {
 		if (!this.#pending) {
 			if (index !== 0) throw new Error("rpc chunk sequence must start at index 0");
 			this.#pending = { chunkId, count, byteLength, nextIndex: 0, chunks: [], receivedBytes: 0 };
+			this.#armTimeout();
 		}
 		const pending = this.#pending;
 		if (
@@ -181,8 +216,14 @@ export class RpcFrameDecoder {
 		if (pending.nextIndex < pending.count) return undefined;
 		if (pending.receivedBytes !== pending.byteLength) throw new Error("rpc chunk sequence length mismatch");
 
-		this.#pending = undefined;
-		const decoded = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(pending.chunks));
+		const assembledBytes = Buffer.concat(pending.chunks);
+		const actualDigest = createHash("sha256").update(assembledBytes).digest("hex");
+		if (actualDigest !== digest) {
+			this.#clearPending();
+			throw new Error("rpc chunk digest mismatch");
+		}
+		this.#clearPending();
+		const decoded = new TextDecoder("utf-8", { fatal: true }).decode(assembledBytes);
 		const frame: unknown = JSON.parse(decoded);
 		if (!isRecord(frame)) throw new Error("rpc frame must be an object");
 		return frame;

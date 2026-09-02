@@ -166,16 +166,19 @@ export interface RpcReadyFrame {
 	type: "ready";
 	protocolVersion: 1;
 	supportedProtocolVersions: [1, 2];
+	capabilities: ["rpc_chunking.v1"];
 	maxFrameBytes: number;
 	maxReassembledFrameBytes: number;
 }
 
 export interface RpcChunkFrame {
 	type: "rpc_chunk";
+	version: 1;
 	chunkId: string;
 	index: number;
 	count: number;
 	byteLength: number;
+	digest: string;
 	data: string;
 }
 

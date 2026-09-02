@@ -285,22 +285,43 @@ describe("RPC frame encoding", () => {
 		const decoder = new RpcFrameDecoder();
 		decoder.push({
 			type: "rpc_chunk",
+			version: 1,
 			chunkId: "chunk-1",
 			index: 0,
 			count: 2,
 			byteLength: MAX_RPC_FRAME_BYTES + 1,
+			digest: "0".repeat(64),
 			data: "ew==",
 		});
 
 		expect(() =>
 			decoder.push({
-				type: "rpc_chunk",
+				 type: "rpc_chunk",
+				 version: 1,
 				chunkId: "chunk-2",
 				index: 1,
 				count: 2,
-				byteLength: MAX_RPC_FRAME_BYTES + 1,
+				 byteLength: MAX_RPC_FRAME_BYTES + 1,
+				digest: "0".repeat(64),
 				data: "fQ==",
 			}),
 		).toThrow("rpc chunk sequence mismatch");
+	});
+
+	it("rejects duplicate chunks and verifies the logical digest", () => {
+		const decoder = new RpcFrameDecoder();
+		const digest = "0".repeat(64);
+		const chunk = { type: "rpc_chunk", version: 1, chunkId: "duplicate", index: 0, count: 2, byteLength: MAX_RPC_FRAME_BYTES + 1, digest, data: "ew==" };
+		decoder.push(chunk);
+		expect(() => decoder.push(chunk)).toThrow("rpc chunk sequence mismatch");
+	});
+
+	it("expires an incomplete chunk sequence", async () => {
+		let timedOut = false;
+		const decoder = new RpcFrameDecoder({ timeoutMs: 5, onTimeout: () => { timedOut = true; } });
+		decoder.push({ type: "rpc_chunk", version: 1, chunkId: "timeout", index: 0, count: 2, byteLength: MAX_RPC_FRAME_BYTES + 1, digest: "0".repeat(64), data: "ew==" });
+		await Bun.sleep(15);
+		expect(timedOut).toBe(true);
+		expect(() => decoder.push({ type: "rpc_chunk", version: 1, chunkId: "timeout", index: 1, count: 2, byteLength: MAX_RPC_FRAME_BYTES + 1, digest: "0".repeat(64), data: "fQ==" })).toThrow("rpc chunk sequence must start at index 0");
 	});
 });

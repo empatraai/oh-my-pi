@@ -937,6 +937,7 @@ class SessionStats:
 class ReadyEvent:
     protocol_version: int | None = None
     supported_protocol_versions: tuple[int, ...] | None = None
+    capabilities: tuple[str, ...] | None = None
     max_frame_bytes: int | None = None
     max_reassembled_frame_bytes: int | None = None
     type: Literal["ready"] = "ready"
@@ -1632,9 +1633,19 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
             ):
                 raise ValueError("ready.supportedProtocolVersions must be integers")
             supported_versions = tuple(raw_versions)
+        raw_capabilities = payload.get("capabilities")
+        capabilities: tuple[str, ...] | None = None
+        if raw_capabilities is not None:
+            if not isinstance(raw_capabilities, list) or any(
+                not isinstance(capability, str) or not capability
+                for capability in raw_capabilities
+            ) or len(set(raw_capabilities)) != len(raw_capabilities):
+                raise ValueError("ready.capabilities must be unique strings")
+            capabilities = tuple(raw_capabilities)
         return ReadyEvent(
             protocol_version=_optional_int(payload, "protocolVersion"),
             supported_protocol_versions=supported_versions,
+            capabilities=capabilities,
             max_frame_bytes=_optional_int(payload, "maxFrameBytes"),
             max_reassembled_frame_bytes=_optional_int(
                 payload, "maxReassembledFrameBytes"

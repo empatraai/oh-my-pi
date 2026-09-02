@@ -873,6 +873,7 @@ export async function runRpcMode(
 			type: "ready",
 			protocolVersion: 1,
 			supportedProtocolVersions: [1, 2],
+			capabilities: ["rpc_chunking.v1"],
 			maxFrameBytes: MAX_RPC_FRAME_BYTES,
 			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
 		}),
