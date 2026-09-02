@@ -9,16 +9,25 @@ import type {
 	EmpatraHostSubagentCloseCommand,
 	EmpatraHostSubagentInterruptCommand,
 	EmpatraHostSubagentListCommand,
+	EmpatraHostSubagentRunner,
 	EmpatraHostSubagentSpawnCommand,
 	EmpatraHostSubagentSteerCommand,
 } from "./subagent-broker";
 import type { EmpatraHostRuntime } from "./server";
 
-type RuntimeFactory = () => Promise<EmpatraHostRuntime>;
+export interface EmpatraHostRuntimeFactoryOptions {
+	/**
+	 * An Electron-main-owned runner. This is an in-process injection seam for
+	 * embedders; the CLI never reconstructs a runner from argv or environment.
+	 */
+	readonly subagentRunner?: EmpatraHostSubagentRunner;
+}
 
-async function loadEmpatraHostRuntime(): Promise<EmpatraHostRuntime> {
+type RuntimeFactory = (options: EmpatraHostRuntimeFactoryOptions) => Promise<EmpatraHostRuntime>;
+
+async function loadEmpatraHostRuntime(options: EmpatraHostRuntimeFactoryOptions): Promise<EmpatraHostRuntime> {
 	const { EmpatraHostAgentRuntime } = await import("./runtime");
-	return new EmpatraHostAgentRuntime();
+	return new EmpatraHostAgentRuntime(options);
 }
 
 /**
@@ -32,9 +41,14 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 	#hostToolSink?: (frame: EmpatraHostToolOutboundFrame) => Promise<void>;
 	#runtime?: EmpatraHostRuntime;
 	readonly #runtimeFactory: RuntimeFactory;
+	readonly #runtimeOptions: EmpatraHostRuntimeFactoryOptions;
 
-	constructor(runtimeFactory: RuntimeFactory = loadEmpatraHostRuntime) {
+	constructor(
+		runtimeFactory: RuntimeFactory = loadEmpatraHostRuntime,
+		runtimeOptions: EmpatraHostRuntimeFactoryOptions = {},
+	) {
 		this.#runtimeFactory = runtimeFactory;
+		this.#runtimeOptions = runtimeOptions;
 	}
 
 	getAdvertisedCapabilities() {
@@ -73,7 +87,7 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 
 	async #load(): Promise<EmpatraHostRuntime> {
 		if (!this.#runtime) {
-			const runtime = await this.#runtimeFactory();
+			const runtime = await this.#runtimeFactory(this.#runtimeOptions);
 			if (this.#eventSink) runtime.setEventSink(this.#eventSink);
 			if (this.#hostToolSink) runtime.setHostToolSink(this.#hostToolSink);
 			this.#runtime = runtime;

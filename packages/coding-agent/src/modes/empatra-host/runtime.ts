@@ -89,6 +89,7 @@ import {
 	type EmpatraHostSubagentCloseCommand,
 	type EmpatraHostSubagentInterruptCommand,
 	type EmpatraHostSubagentListCommand,
+	type EmpatraHostSubagentRunner,
 	type EmpatraHostSubagentSpawnCommand,
 	type EmpatraHostSubagentSteerCommand,
 } from "./subagent-broker";
@@ -952,11 +953,23 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			maxResidentThreads?: number;
 			sessionFactory?: EmpatraHostSessionFactory;
 			subagentController?: EmpatraHostSubagentController;
+			subagentRunner?: EmpatraHostSubagentRunner;
 		} = {},
 	) {
+		if (options.subagentController && options.subagentRunner) {
+			throw new RangeError("Provide either subagentController or subagentRunner, not both");
+		}
+		const subagentRunner = options.subagentRunner;
 		this.#registry = new EmpatraHostThreadRegistry(options.maxResidentThreads);
 		this.#sessionFactory = options.sessionFactory ?? defaultSessionFactory;
-		this.#subagentController = options.subagentController;
+		this.#subagentController =
+			options.subagentController ??
+			(subagentRunner
+				? new EmpatraHostSubagentController({
+						onEvent: event => this.#eventSink(event),
+						runner: subagentRunner,
+				})
+				: undefined);
 		this.#hostToolsConnection = new EmpatraHostToolsConnection();
 		this.#interactionBroker = new EmpatraHostInteractionBroker({
 			emitRequest: request => this.#emitInteractionRequest(request),

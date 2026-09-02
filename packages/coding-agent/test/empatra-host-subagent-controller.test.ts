@@ -7,6 +7,7 @@ import {
 	type EmpatraHostSubagentRunResult,
 	type EmpatraHostSubagentRunner,
 } from "../src/modes/empatra-host";
+import { EmpatraHostAgentRuntime } from "../src/modes/empatra-host/runtime";
 
 const scope = {
 	generation: 1,
@@ -19,6 +20,19 @@ function waitForTick(): Promise<void> {
 }
 
 describe("Empatra host subagent controller", () => {
+	test("advertises the lifecycle capability only when a runner is injected", async () => {
+		const runner: EmpatraHostSubagentRunner = {
+			run: async () => ({ output: "", status: "completed" }),
+		};
+		const withoutRunner = new EmpatraHostAgentRuntime();
+		const withRunner = new EmpatraHostAgentRuntime({ subagentRunner: runner });
+
+		expect(withoutRunner.getAdvertisedCapabilities()).not.toContain(EMPATRA_HOST_SUBAGENT_CAPABILITY);
+		expect(withRunner.getAdvertisedCapabilities()).toContain(EMPATRA_HOST_SUBAGENT_CAPABILITY);
+		await withoutRunner.dispose();
+		await withRunner.dispose();
+	});
+
 	test("projects runner lifecycle, progress, and bounded result while keeping list scoped", async () => {
 		const events: unknown[] = [];
 		let received: EmpatraHostSubagentRunContext | undefined;

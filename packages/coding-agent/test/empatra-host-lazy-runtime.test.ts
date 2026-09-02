@@ -7,6 +7,7 @@ import type {
 	EmpatraHostToolOutboundFrame,
 } from "../src/modes/empatra-host/protocol";
 import type { EmpatraHostRuntime } from "../src/modes/empatra-host/server";
+import type { EmpatraHostSubagentRunner } from "../src/modes/empatra-host/subagent-broker";
 
 const initializeCommand: EmpatraHostInitializeCommand = {
 	capability: "c".repeat(48),
@@ -50,5 +51,28 @@ describe("LazyEmpatraHostRuntime", () => {
 		expect(factoryCalls).toBe(1);
 		expect(receivedEventSink).toBe(eventSink);
 		expect(receivedHostToolSink).toBe(hostToolSink);
+	});
+
+	test("passes an injected runner through the lazy boundary without serializing it", async () => {
+		const runner: EmpatraHostSubagentRunner = {
+			run: async () => ({ output: "", status: "completed" }),
+		};
+		let receivedRunner: EmpatraHostSubagentRunner | undefined;
+		const runtime = {
+			dispose: async () => undefined,
+			initialize: async () => ({ modelCount: 0, workspaceRootCount: 1 }),
+			setEventSink: () => undefined,
+			setHostToolSink: () => undefined,
+		} as unknown as EmpatraHostRuntime;
+		const lazy = new LazyEmpatraHostRuntime(
+			async options => {
+				receivedRunner = options.subagentRunner;
+				return runtime;
+			},
+			{ subagentRunner: runner },
+		);
+
+		await lazy.initialize(initializeCommand);
+		expect(receivedRunner).toBe(runner);
 	});
 });
