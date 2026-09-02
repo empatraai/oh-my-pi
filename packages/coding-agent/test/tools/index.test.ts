@@ -87,11 +87,14 @@ describe("createTools", () => {
 			restrictToolNames: true,
 			subagentRpcBroker: {
 				capability: "subagents.lifecycle.v1",
+				close: async () => undefined,
 				interrupt: async () => undefined,
+				list: async () => ({ subagents: [] }),
 				spawn: async (scope, request) => {
 					calls.push({ scope, request });
 					return { childId: "child-1", index: 0, status: "running" as const };
 				},
+				steer: async () => undefined,
 			},
 			subagentRpcScope: () => ({ generation: 3, parentThreadId: "thread-1", parentTurnId: "turn-1" }),
 		});
@@ -112,6 +115,81 @@ describe("createTools", () => {
 		]);
 	});
 
+	it("keeps lifecycle control model-facing and scope-bound after a spawn", async () => {
+		const calls: Array<{ operation: string; childId?: string; message?: string }> = [];
+		const session = createTestSession({
+			restrictToolNames: true,
+			subagentRpcBroker: {
+				capability: "subagents.lifecycle.v1",
+				close: async (_scope, childId) => { calls.push({ operation: "close", childId }); },
+				interrupt: async (_scope, childId) => { calls.push({ operation: "interrupt", childId }); },
+				list: async () => ({
+					subagents: [{
+						agentName: "reviewer",
+						childId: "child-1",
+						index: 0,
+						status: "running" as const,
+						updatedAtMs: 123,
+					}],
+				}),
+				spawn: async () => ({ childId: "child-1", index: 0, status: "running" as const }),
+				steer: async (_scope, childId, message) => { calls.push({ operation: "steer", childId, message }); },
+			},
+			subagentRpcScope: () => ({ generation: 3, parentThreadId: "thread-1", parentTurnId: "turn-1" }),
+		});
+		const tools = await createTools(session, ["task"]);
+		const task = tools[0]!;
+
+		const listed = await task.execute("list", { operation: "list" });
+		expect(listed).toMatchObject({
+			details: { operation: "list", status: "completed", children: [{ childId: "child-1", agentName: "reviewer" }] },
+		});
+		const steered = await task.execute("steer", {
+			operation: "steer",
+			childId: "child-1",
+			message: "Уточни критерий приемки",
+		});
+		expect(steered).toMatchObject({ details: { operation: "steer", childId: "child-1", status: "running" } });
+		const interrupted = await task.execute("interrupt", { operation: "interrupt", childId: "child-1" });
+		expect(interrupted).toMatchObject({ details: { operation: "interrupt", childId: "child-1", status: "aborted" } });
+		const closed = await task.execute("close", { operation: "close", childId: "child-1" });
+		expect(closed).toMatchObject({ details: { operation: "close", childId: "child-1", status: "aborted" } });
+		expect(calls).toEqual([
+			{ operation: "steer", childId: "child-1", message: "Уточни критерий приемки" },
+			{ operation: "interrupt", childId: "child-1" },
+			{ operation: "close", childId: "child-1" },
+		]);
+	});
+
+	it("rejects lifecycle inputs that try to cross spawn boundaries", async () => {
+		const spawn = vi.fn(async () => ({ childId: "never", index: 0, status: "running" as const }));
+		const steer = vi.fn(async () => undefined);
+		const session = createTestSession({
+			restrictToolNames: true,
+			subagentRpcBroker: {
+				capability: "subagents.lifecycle.v1",
+				close: async () => undefined,
+				interrupt: async () => undefined,
+				list: async () => ({ subagents: [] }),
+				spawn,
+				steer,
+			},
+			subagentRpcScope: () => ({ generation: 1, parentThreadId: "thread-1", parentTurnId: "turn-1" }),
+		});
+		const tools = await createTools(session, ["task"]);
+		const malformed = await tools[0]!.execute("malformed", {
+			operation: "steer",
+			childId: "child-1",
+			message: "направление",
+			task: "не должно пройти",
+			cwd: "/must-not-cross-boundary",
+			env: { SECRET: "must-not-cross-boundary" },
+		});
+		expect(malformed).toMatchObject({ isError: true, details: { status: "failed" } });
+		expect(spawn).not.toHaveBeenCalled();
+		expect(steer).not.toHaveBeenCalled();
+	});
+
 	it("fans out the native batch shape with shared context through the gated broker", async () => {
 		const calls: unknown[] = [];
 		let nextIndex = 0;
@@ -119,12 +197,15 @@ describe("createTools", () => {
 			restrictToolNames: true,
 			subagentRpcBroker: {
 				capability: "subagents.lifecycle.v1",
+				close: async () => undefined,
+				interrupt: async () => undefined,
+				list: async () => ({ subagents: [] }),
 				spawn: async (scope, request) => {
 					calls.push({ scope, request });
 					const index = nextIndex++;
 					return { childId: `child-${index + 1}`, index, status: "running" as const };
 				},
-				interrupt: async () => undefined,
+				steer: async () => undefined,
 			},
 			subagentRpcScope: () => ({ generation: 3, parentThreadId: "thread-1", parentTurnId: "turn-1" }),
 		});
@@ -165,7 +246,14 @@ describe("createTools", () => {
 		const spawn = vi.fn(async () => ({ childId: "never", index: 0, status: "running" as const }));
 		const session = createTestSession({
 			restrictToolNames: true,
-			subagentRpcBroker: { capability: "subagents.lifecycle.v1", interrupt: async () => undefined, spawn },
+			subagentRpcBroker: {
+				capability: "subagents.lifecycle.v1",
+				close: async () => undefined,
+				interrupt: async () => undefined,
+				list: async () => ({ subagents: [] }),
+				spawn,
+				steer: async () => undefined,
+			},
 			subagentRpcScope: () => ({ generation: 1, parentThreadId: "thread-1", parentTurnId: "turn-1" }),
 		});
 		const tools = await createTools(session, ["task"]);

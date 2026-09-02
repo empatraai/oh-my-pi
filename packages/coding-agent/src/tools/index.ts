@@ -508,15 +508,38 @@ export type ToolName = BuiltinToolName;
 /** Narrow main-owned seam for the explicitly negotiated model-facing task tool. */
 export interface ModelSubagentRpcBroker {
 	readonly capability: string;
-	/** Cancellation for a child accepted during a tool abort. */
+	/** Close a child and release its main-owned execution resources. */
+	close(
+		scope: { generation: number; parentThreadId: string; parentTurnId: string },
+		childId: string,
+	): Promise<void>;
+	/** Cancellation for a child accepted during a tool abort or explicit model control. */
 	interrupt(
 		scope: { generation: number; parentThreadId: string; parentTurnId: string },
 		childId: string,
 	): Promise<void>;
+	/** Return only children owned by the current parent turn scope. */
+	list(
+		scope: { generation: number; parentThreadId: string; parentTurnId: string },
+	): Promise<{
+		subagents: readonly {
+			agentName: string;
+			childId: string;
+			index: number;
+			status: "aborted" | "completed" | "failed" | "running";
+			updatedAtMs: number;
+		}[];
+	}>;
 	spawn(
 		scope: { generation: number; parentThreadId: string; parentTurnId: string },
 		request: { agentName?: string; assignment: string; modelId?: string },
 	): Promise<{ childId: string; index: number; status: "running" }>;
+	/** Queue a bounded steering message for a currently running child. */
+	steer(
+		scope: { generation: number; parentThreadId: string; parentTurnId: string },
+		childId: string,
+		message: string,
+	): Promise<void>;
 }
 
 export interface ModelSubagentRpcScope {
