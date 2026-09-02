@@ -92,6 +92,8 @@ import {
 	type EmpatraHostSubagentScope,
 	type EmpatraHostSubagentRunner,
 	type EmpatraHostSubagentResponseCommand,
+	type EmpatraHostSubagentBroker,
+	type EmpatraHostSubagentRpcBootstrap,
 	type EmpatraHostSubagentRpcTransport,
 	type EmpatraHostSubagentSpawnCommand,
 	type EmpatraHostSubagentSteerCommand,
@@ -273,6 +275,12 @@ export interface EmpatraHostSessionFactoryOptions {
 	sessionManager: SessionManager;
 	settings: Settings;
 	systemPrompt: string;
+	/** Present only after the host_initialize subagent bootstrap was accepted. */
+	subagentRpc?: EmpatraHostSubagentRpcBootstrap;
+	/** Broker is process-local; it only emits bounded requests to the main host. */
+	subagentRpcBroker?: EmpatraHostSubagentBroker;
+	/** Active parent scope; undefined outside a running turn. */
+	subagentRpcScope?: () => EmpatraHostSubagentScope | undefined;
 }
 
 export type EmpatraHostSessionFactory = (options: EmpatraHostSessionFactoryOptions) => Promise<EmpatraHostSession>;
@@ -293,6 +301,7 @@ interface InitializedRuntime {
 	skills: readonly Skill[];
 	policy: EmpatraHostWorkspacePolicy;
 	sessionDirectory: string;
+	subagentRpc?: EmpatraHostSubagentRpcBootstrap;
 }
 
 function isInsideDirectory(root: string, candidate: string): boolean {
@@ -863,6 +872,10 @@ function toModel(model: EmpatraHostModel, gatewayBaseUrl: string): Model<"openai
 
 async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions): Promise<EmpatraHostSession> {
 	const { createAgentSession } = await import("../../sdk");
+	const subagentRpcEnabled =
+		options.subagentRpc?.capability === EMPATRA_HOST_SUBAGENT_CAPABILITY &&
+		options.subagentRpcBroker !== undefined &&
+		options.subagentRpcScope !== undefined;
 	const { session, setToolUIContext } = await createAgentSession({
 		agentDir: options.agentDir,
 		allowRestrictedCustomTools: false,
@@ -900,7 +913,9 @@ async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions):
 		skills: [...options.skills],
 		slashCommands: [],
 		systemPrompt: options.systemPrompt,
-		toolNames: [],
+		subagentRpcBroker: subagentRpcEnabled ? options.subagentRpcBroker : undefined,
+		subagentRpcScope: subagentRpcEnabled ? options.subagentRpcScope : undefined,
+		toolNames: subagentRpcEnabled ? ["task"] : [],
 	});
 	return {
 		abort: session.abort.bind(session),
@@ -1109,6 +1124,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			skills,
 			policy,
 			sessionDirectory,
+			...(command.subagentRpc === undefined ? {} : { subagentRpc: command.subagentRpc }),
 		};
 		return {
 			extensionCount: extensionPaths.length,
@@ -2779,6 +2795,17 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			{ "tools.approvalMode": defaultApprovalMode },
 			{ agentDir: runtime.agentDir, cwd },
 		);
+		const handleRef: { current: ThreadHandle | undefined } = { current: undefined };
+		const subagentRpcScope = (): EmpatraHostSubagentScope | undefined => {
+			const handle = handleRef.current;
+			const activeTurn = handle?.activeTurn;
+			if (!handle || !activeTurn) return undefined;
+			return {
+				generation: activeTurn.generation,
+				parentThreadId: handle.threadId,
+				parentTurnId: activeTurn.turnId,
+			};
+		};
 		const session = await this.#sessionFactory({
 			agentDir: runtime.agentDir,
 			capability: runtime.capability,
@@ -2791,8 +2818,14 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			sessionManager,
 			settings,
 			systemPrompt,
+			...(runtime.subagentRpc === undefined
+				? {}
+				: {
+						subagentRpc: runtime.subagentRpc,
+						subagentRpcBroker: this.#requireSubagentRpcBroker(),
+						subagentRpcScope,
+				  }),
 		});
-		const handleRef: { current: ThreadHandle | undefined } = { current: undefined };
 		const hostTools = this.#hostToolsConnection.createSession((): EmpatraHostToolScope | undefined => {
 			const handle = handleRef.current;
 			const activeTurn = handle?.activeTurn;

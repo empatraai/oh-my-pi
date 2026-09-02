@@ -533,6 +533,10 @@ export interface CreateAgentSessionOptions {
 	enableMCP?: boolean;
 	/** Existing MCP manager to reuse when MCP is enabled (skips discovery, propagates to toolSession). */
 	mcpManager?: MCPManager;
+	/** Explicitly negotiated main-owned subagent broker for the Empatra host. */
+	subagentRpcBroker?: ToolSession["subagentRpcBroker"];
+	/** Current generation/turn scope for the negotiated subagent broker. */
+	subagentRpcScope?: ToolSession["subagentRpcScope"];
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -1780,6 +1784,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get additionalDirectories() {
 				return sessionManager.getAdditionalDirectories();
 			},
+			subagentRpcBroker: options.subagentRpcBroker,
+			subagentRpcScope: options.subagentRpcScope,
 			enableLsp,
 			lspReadOnly,
 			enableIrc: restrictToolNames ? false : options.enableIrc,

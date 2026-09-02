@@ -81,6 +81,41 @@ describe("createTools", () => {
 		expect(names).not.toContain("find");
 	});
 
+	it("uses the negotiated main-owned broker for the restricted task surface", async () => {
+		const calls: unknown[] = [];
+		const session = createTestSession({
+			restrictToolNames: true,
+			subagentRpcBroker: {
+				capability: "subagents.lifecycle.v1",
+				spawn: async (scope, request) => {
+					calls.push({ scope, request });
+					return { childId: "child-1", index: 0, status: "running" as const };
+				},
+			},
+			subagentRpcScope: () => ({ generation: 3, parentThreadId: "thread-1", parentTurnId: "turn-1" }),
+		});
+		const tools = await createTools(session, ["task"]);
+		expect(tools.map(tool => tool.name)).toEqual(["task"]);
+
+		const result = await tools[0]!.execute("call-1", {
+			agent: "reviewer",
+			model: "managed-model",
+			task: "Проверь только контракт RPC",
+		});
+		expect(result).toMatchObject({ details: { childId: "child-1", status: "running" } });
+		expect(calls).toEqual([
+			{
+				scope: { generation: 3, parentThreadId: "thread-1", parentTurnId: "turn-1" },
+				request: { agentName: "reviewer", assignment: "Проверь только контракт RPC", modelId: "managed-model" },
+			},
+		]);
+	});
+
+	it("does not expose task without an explicit broker", async () => {
+		const tools = await createTools(createTestSession({ restrictToolNames: true }), []);
+		expect(tools.map(tool => tool.name)).not.toContain("task");
+	});
+
 	it("includes bash and eval when both eval backends are allowed", async () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({

@@ -69,6 +69,8 @@ import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
+import { EmpatraHostSubagentTool } from "../modes/empatra-host/subagent-tool";
+import { EMPATRA_HOST_SUBAGENT_CAPABILITY } from "../modes/empatra-host/subagent-broker";
 
 export * from "../edit";
 export * from "../goals";
@@ -253,6 +255,10 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Explicitly negotiated main-owned subagent broker. */
+	subagentRpcBroker?: ModelSubagentRpcBroker;
+	/** Current generation/turn scope for the negotiated subagent broker. */
+	subagentRpcScope?: () => ModelSubagentRpcScope | undefined;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
@@ -499,6 +505,21 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 
 export type ToolName = BuiltinToolName;
 
+/** Narrow main-owned seam for the explicitly negotiated model-facing task tool. */
+export interface ModelSubagentRpcBroker {
+	readonly capability: string;
+	spawn(
+		scope: { generation: number; parentThreadId: string; parentTurnId: string },
+		request: { agentName?: string; assignment: string; modelId?: string },
+	): Promise<{ childId: string; index: number; status: "running" }>;
+}
+
+export interface ModelSubagentRpcScope {
+	generation: number;
+	parentThreadId: string;
+	parentTurnId: string;
+}
+
 /**
  * Create tools from BUILTIN_TOOLS registry.
  */
@@ -640,6 +661,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
+	// A restricted Empatra host session may opt into the model-facing `task`
+	// name, but must route it through the negotiated main-owned broker rather
+	// than constructing OMP's in-process TaskTool. The broker is absent for all
+	// ordinary sessions, so this cannot widen their tool surface.
+	if (session.subagentRpcBroker?.capability === EMPATRA_HOST_SUBAGENT_CAPABILITY) {
+		allTools.task = sessionForTask => new EmpatraHostSubagentTool(sessionForTask);
+	}
 	const isToolAllowed = (name: string) => {
 		// Never in the default set. Explicitly activatable while goal.enabled and
 		// no goal record exists yet — /guided-goal enables it so the agent can
