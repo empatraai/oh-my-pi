@@ -48,6 +48,18 @@ export const EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY = "thread_read.turns-v
 export const EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY = "extensions.explicit-v1" as const;
 /** Per-turn model and system-prompt changes, committed by the host before dispatch. */
 export const EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY = "turn_configuration.v1" as const;
+/**
+ * Strict image-generation DTO contract. It is not advertised until Electron
+ * wires a main-owned provider executor; OMP must never resolve credentials or
+ * use a sidecar-local provider as a fallback.
+ */
+export const EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY = "images.generation-v1" as const;
+/**
+ * Reserved for an Electron-main-owned filesystem/process broker. It is not
+ * advertised in `EMPATRA_HOST_CAPABILITIES` until a platform adapter and its
+ * approval/sandbox gates are wired end to end.
+ */
+export const EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY = "execution_broker.v1" as const;
 export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
