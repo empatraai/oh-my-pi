@@ -68,9 +68,7 @@ describe("Empatra host execution broker seam", () => {
 				type: "execution_broker_response",
 			}),
 		).toMatchObject({ error: { code: "approval_denied" }, operation: "filesystem.read" });
-		expect(() => parseEmpatraHostExecutionBrokerRequest({ ...request, env: { TOKEN: "secret" } })).toThrow(
-			"invalid",
-		);
+		expect(() => parseEmpatraHostExecutionBrokerRequest({ ...request, env: { TOKEN: "secret" } })).toThrow("invalid");
 		expect(() =>
 			parseEmpatraHostExecutionBrokerResponse({
 				generation: 2,

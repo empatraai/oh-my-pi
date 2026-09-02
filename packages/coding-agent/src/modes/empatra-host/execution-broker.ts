@@ -173,7 +173,9 @@ export function parseEmpatraHostExecutionRequest(value: unknown): EmpatraHostExe
 	const base = scope(value);
 	switch (value.operation) {
 		case "filesystem.read":
-			if (!hasOnlyKeys(value, ["generation", "maxBytes", "offsetBytes", "operation", "path", "threadId", "turnId"])) {
+			if (
+				!hasOnlyKeys(value, ["generation", "maxBytes", "offsetBytes", "operation", "path", "threadId", "turnId"])
+			) {
 				throw new EmpatraHostProtocolError("execution_request_invalid", "filesystem.read contains unknown fields");
 			}
 			return {
@@ -186,7 +188,9 @@ export function parseEmpatraHostExecutionRequest(value: unknown): EmpatraHostExe
 				path: boundedString(value.path, "path", EMPATRA_HOST_MAX_EXECUTION_PATH_BYTES),
 			};
 		case "filesystem.write":
-			if (!hasOnlyKeys(value, ["content", "expectedSha256", "generation", "operation", "path", "threadId", "turnId"])) {
+			if (
+				!hasOnlyKeys(value, ["content", "expectedSha256", "generation", "operation", "path", "threadId", "turnId"])
+			) {
 				throw new EmpatraHostProtocolError("execution_request_invalid", "filesystem.write contains unknown fields");
 			}
 			return {
@@ -209,7 +213,18 @@ export function parseEmpatraHostExecutionRequest(value: unknown): EmpatraHostExe
 				path: boundedString(value.path, "path", EMPATRA_HOST_MAX_EXECUTION_PATH_BYTES),
 			};
 		case "process.exec":
-			if (!hasOnlyKeys(value, ["args", "command", "generation", "maxOutputBytes", "operation", "threadId", "timeoutMs", "turnId"])) {
+			if (
+				!hasOnlyKeys(value, [
+					"args",
+					"command",
+					"generation",
+					"maxOutputBytes",
+					"operation",
+					"threadId",
+					"timeoutMs",
+					"turnId",
+				])
+			) {
 				throw new EmpatraHostProtocolError("execution_request_invalid", "process.exec contains unknown fields");
 			}
 			if (!Array.isArray(value.args) || value.args.length > EMPATRA_HOST_MAX_EXECUTION_ARGUMENTS) {
@@ -217,9 +232,16 @@ export function parseEmpatraHostExecutionRequest(value: unknown): EmpatraHostExe
 			}
 			return {
 				...base,
-				args: value.args.map((arg, index) => boundedString(arg, `args[${index}]`, EMPATRA_HOST_MAX_EXECUTION_ARGUMENT_BYTES)),
+				args: value.args.map((arg, index) =>
+					boundedString(arg, `args[${index}]`, EMPATRA_HOST_MAX_EXECUTION_ARGUMENT_BYTES),
+				),
 				command: boundedString(value.command, "command", EMPATRA_HOST_MAX_EXECUTION_COMMAND_BYTES),
-				maxOutputBytes: boundedInteger(value.maxOutputBytes, "maxOutputBytes", 1, EMPATRA_HOST_MAX_EXECUTION_OUTPUT_BYTES),
+				maxOutputBytes: boundedInteger(
+					value.maxOutputBytes,
+					"maxOutputBytes",
+					1,
+					EMPATRA_HOST_MAX_EXECUTION_OUTPUT_BYTES,
+				),
 				operation: "process.exec",
 				timeoutMs: boundedInteger(value.timeoutMs, "timeoutMs", 1, EMPATRA_HOST_MAX_EXECUTION_TIMEOUT_MS),
 			};
@@ -228,11 +250,18 @@ export function parseEmpatraHostExecutionRequest(value: unknown): EmpatraHostExe
 	}
 }
 
-function validateResult(result: EmpatraHostExecutionResult, operation: EmpatraHostExecutionOperation): EmpatraHostExecutionResult {
+function validateResult(
+	result: EmpatraHostExecutionResult,
+	operation: EmpatraHostExecutionOperation,
+): EmpatraHostExecutionResult {
 	if (!isRecord(result) || !hasOnlyKeys(result, ["exitCode", "operation", "output", "outputTruncated"])) {
 		throw new EmpatraHostProtocolError("execution_result_invalid", "execution result is invalid");
 	}
-	if (result.operation !== operation || typeof result.output !== "string" || typeof result.outputTruncated !== "boolean") {
+	if (
+		result.operation !== operation ||
+		typeof result.output !== "string" ||
+		typeof result.outputTruncated !== "boolean"
+	) {
 		throw new EmpatraHostProtocolError("execution_result_invalid", "execution result identity is invalid");
 	}
 	if (new TextEncoder().encode(result.output).byteLength > EMPATRA_HOST_MAX_EXECUTION_OUTPUT_BYTES) {
