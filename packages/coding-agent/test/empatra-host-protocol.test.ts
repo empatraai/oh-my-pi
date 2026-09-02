@@ -454,6 +454,7 @@ describe("Empatra host protocol", () => {
 		expect(
 			parseEmpatraHostCommand(
 				JSON.stringify({
+					approvalMode: "yolo",
 					expectedGeneration: 1,
 					id: "steer-1",
 					message: "Уточнение",
@@ -462,7 +463,15 @@ describe("Empatra host protocol", () => {
 					type: "turn_steer",
 				}),
 			),
-		).toMatchObject({ expectedGeneration: 1, type: "turn_steer" });
+		).toEqual({
+			approvalMode: "yolo",
+			expectedGeneration: 1,
+			id: "steer-1",
+			message: "Уточнение",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			type: "turn_steer",
+		});
 		expect(
 			parseEmpatraHostCommand(
 				JSON.stringify({ id: "rollback-1", threadId: "thread-1", turns: 2, type: "thread_rollback" }),
