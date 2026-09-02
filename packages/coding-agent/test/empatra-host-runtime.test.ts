@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -214,6 +214,72 @@ await new Promise(() => {});`,
 		})) as { generation: number; threadId: string };
 		expect(created.generation).toBe(0);
 		expect(created.threadId).toBeString();
+		await runtime.dispose();
+	});
+
+	test("passes only private materialized skills into injected OMP sessions", async () => {
+		const host = await temporaryHost();
+		const skillRoot = path.join(host.sessions, "runtime", "skill-snapshots", "revision", "review");
+		await mkdir(skillRoot, { recursive: true });
+		await writeFile(path.join(skillRoot, "SKILL.md"), "# Review\n", "utf8");
+		const received: EmpatraHostSessionFactoryOptions[] = [];
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async input => {
+				received.push(input);
+				return new FakeSession();
+			},
+		});
+		await runtime.initialize({
+			...initializeCommand(host.workspace, host.sessions),
+			skills: [
+				{
+					baseDir: skillRoot,
+					description: "Review workflow",
+					filePath: path.join(skillRoot, "SKILL.md"),
+					name: "review",
+					source: "empatra:repo",
+				},
+			],
+		});
+		await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-skill-session",
+			modelId: "managed-model",
+			operationId: "operation-skill-session",
+			systemPrompt: "Empatra system prompt",
+			type: "thread_create",
+		});
+		expect(received).toHaveLength(1);
+		expect(received[0]?.skills).toEqual([
+			expect.objectContaining({
+				name: "review",
+				source: "empatra:repo",
+			}),
+		]);
+		expect(received[0]?.skills[0]?.filePath).toBe(path.join(await realpath(skillRoot), "SKILL.md"));
+		await runtime.dispose();
+	});
+
+	test("rejects a skill descriptor that escapes private session storage", async () => {
+		const host = await temporaryHost();
+		const outsideRoot = path.join(host.root, "outside-skill");
+		await mkdir(outsideRoot, { recursive: true });
+		await writeFile(path.join(outsideRoot, "SKILL.md"), "# Outside\n", "utf8");
+		const runtime = new EmpatraHostAgentRuntime();
+		await expect(
+			runtime.initialize({
+				...initializeCommand(host.workspace, host.sessions),
+				skills: [
+					{
+						baseDir: outsideRoot,
+						description: "must be rejected",
+						filePath: path.join(outsideRoot, "SKILL.md"),
+						name: "outside",
+						source: "empatra:repo",
+					},
+				],
+			}),
+		).rejects.toMatchObject({ code: "invalid_request" });
 		await runtime.dispose();
 	});
 
