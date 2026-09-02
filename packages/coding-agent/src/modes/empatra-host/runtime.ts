@@ -455,7 +455,7 @@ function utf8Chunks(value: string, maxBytes: number): string[] {
 	const chunks: string[] = [];
 	let bytes = 0;
 	let start = 0;
-	for (let index = 0; index < value.length; ) {
+	for (let index = 0; index < value.length;) {
 		const codePoint = value.codePointAt(index) ?? 0;
 		const codeUnits = codePoint > 0xffff ? 2 : 1;
 		const codePointBytes = codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
@@ -2611,19 +2611,19 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			settings,
 			systemPrompt,
 		});
-		let handle: ThreadHandle;
+		const handleRef: { current: ThreadHandle | undefined } = { current: undefined };
 		const hostTools = this.#hostToolsConnection.createSession((): EmpatraHostToolScope | undefined => {
+			const handle = handleRef.current;
 			const activeTurn = handle?.activeTurn;
-			return activeTurn?.catalogRevision
-				? {
-						catalogRevision: activeTurn.catalogRevision,
-						generation: activeTurn.generation,
-						threadId: handle.threadId,
-						turnId: activeTurn.turnId,
-					}
-				: undefined;
+			if (!handle || !activeTurn?.catalogRevision) return undefined;
+			return {
+				catalogRevision: activeTurn.catalogRevision,
+				generation: activeTurn.generation,
+				threadId: handle.threadId,
+				turnId: activeTurn.turnId,
+			};
 		});
-		handle = {
+		const handle: ThreadHandle = {
 			activeTurn: null,
 			defaultApprovalMode,
 			dispose: async () => {
@@ -2645,6 +2645,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			threadId: sessionManager.getSessionId(),
 			unsubscribe: () => undefined,
 		};
+		handleRef.current = handle;
 		try {
 			return await this.#withOperationCommand("empatra-host-tools", async () => {
 				const catalog = this.#hostToolCatalog;

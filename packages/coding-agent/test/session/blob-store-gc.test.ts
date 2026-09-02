@@ -547,17 +547,16 @@ describe("BlobStore reference-aware garbage collection", () => {
 		const releaseFirst = Promise.withResolvers<void>();
 		const original = BlobStore.prototype.collectGarbage;
 		let calls = 0;
-		const collection = spyOn(BlobStore.prototype, "collectGarbage").mockImplementation(async function (
-			this: BlobStore,
-			options,
-		) {
-			calls += 1;
-			if (calls === 1) {
-				firstEntered.resolve();
-				await releaseFirst.promise;
-			}
-			return await original.call(this, options);
-		});
+		const collection = spyOn(BlobStore.prototype, "collectGarbage").mockImplementation(
+			async function (this: BlobStore, options) {
+				calls += 1;
+				if (calls === 1) {
+					firstEntered.resolve();
+					await releaseFirst.promise;
+				}
+				return await original.call(this, options);
+			},
+		);
 		try {
 			manager.scheduleBlobGarbageCollection();
 			await firstEntered.promise;
