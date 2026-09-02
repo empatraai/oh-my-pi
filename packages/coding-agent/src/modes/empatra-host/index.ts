@@ -9,6 +9,7 @@ export * from "./media-input";
 export * from "./protocol";
 export * from "./runtime";
 export * from "./server";
+export * from "./subagent-broker";
 export * from "./thread-metadata-store";
 export * from "./thread-projection";
 export * from "./thread-registry";
