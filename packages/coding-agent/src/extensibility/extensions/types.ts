@@ -187,6 +187,8 @@ export interface ExtensionUIApprovalContext {
 	rawInput: string;
 	toolCallId: string;
 	toolName: string;
+	/** Optional bounded reason supplied when the host denies this approval. */
+	feedback?: string;
 }
 
 /**

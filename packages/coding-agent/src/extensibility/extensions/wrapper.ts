@@ -443,8 +443,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
 			let choice: string | undefined;
+			let approvalContext: ExtensionUIApprovalContext | undefined;
 			try {
-				const approvalContext = createApprovalContext(effectiveParams, toolCallId, this.tool.name);
+				approvalContext = createApprovalContext(effectiveParams, toolCallId, this.tool.name);
 				approvedInputDigest = approvalContext.inputDigest;
 				const safePrompt = redactSensitiveApprovalText(safetyPrompt);
 				if (new TextEncoder().encode(safePrompt).byteLength > MAX_APPROVAL_RAW_INPUT_BYTES) {
@@ -460,9 +461,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				throw err;
 			}
 			const approved = choice === "Approve";
-			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
+			const feedback = approvalContext?.feedback?.trim();
+			await emitApprovalResolved(approved, approved ? undefined : feedback || "denied by user");
 			if (!approved) {
-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				throw new Error(
+					`Tool call denied by user: ${this.tool.name}` +
+					(feedback ? `\nFeedback: ${feedback}` : ""),
+				);
 			}
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) throw new Error("Provider safety approval context is unavailable");

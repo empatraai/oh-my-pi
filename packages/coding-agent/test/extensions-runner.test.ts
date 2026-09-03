@@ -2279,7 +2279,7 @@ describe("ExtensionRunner", () => {
 	describe("tool approval lifecycle", () => {
 		const initializeRunner = (
 			runner: ExtensionRunner,
-			select: (title: string, options: string[]) => Promise<string | undefined>,
+			select: (title: string, options: string[], dialogOptions?: ExtensionUIDialogOptions) => Promise<string | undefined>,
 		) => {
 			runner.initialize(
 				{
@@ -2655,7 +2655,12 @@ describe("ExtensionRunner", () => {
 				sessionManager,
 				modelRegistry,
 			);
-			initializeRunner(runner, async () => "Deny");
+			initializeRunner(runner, async (_title, _options, dialogOptions) => {
+				if (dialogOptions?.internalApprovalContext) {
+					dialogOptions.internalApprovalContext.feedback = "Use the workspace path";
+				}
+				return "Deny";
+			});
 
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
@@ -2668,11 +2673,11 @@ describe("ExtensionRunner", () => {
 					abort: () => {},
 					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
 				}),
-			).rejects.toThrow("Tool call denied by user: dangerous_tool");
+			).rejects.toThrow("Tool call denied by user: dangerous_tool\nFeedback: Use the workspace path");
 
 			expect(events).toEqual([
 				{ type: "tool_approval_requested", reason: undefined },
-				{ type: "tool_approval_resolved", approved: false, reason: "denied by user" },
+				{ type: "tool_approval_resolved", approved: false, reason: "Use the workspace path" },
 			]);
 			delete globalState.__deniedApprovalEvents;
 		});

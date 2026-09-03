@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ExtensionUIContext } from "../src/extensibility/extensions/types";
+import type { ExtensionUIContext, ExtensionUIApprovalContext } from "../src/extensibility/extensions/types";
 import {
 	createEmpatraHostInteractionUIContext,
 	EMPATRA_HOST_MAX_PENDING_INTERACTIONS,
@@ -74,6 +74,36 @@ describe("EmpatraHostInteractionBroker", () => {
 				kind: "approval_response",
 			}),
 		).toEqual({ accepted: false, code: "not_pending" });
+	});
+
+	test("returns bounded approval feedback through the internal approval context", async () => {
+		let emitted: EmpatraHostInteractionRequest | undefined;
+		const approvalContext: ExtensionUIApprovalContext = {
+			inputDigest: Bun.SHA256.hash("{}", "hex"),
+			rawInput: "{}",
+			toolCallId: "call-feedback",
+			toolName: "bash",
+		};
+		const broker = new EmpatraHostInteractionBroker({
+			createRequestId: sequentialIds("feedback"),
+			emitRequest: request => {
+				emitted = request;
+			},
+		});
+		const selection = broker.select(interactionScope("thread-feedback"), "Allow tool?", ["Approve", "Deny"], {
+			internalApprovalContext: approvalContext,
+		});
+		if (!emitted || emitted.kind !== "approval") throw new Error("approval request was not emitted");
+		expect(
+			broker.resolveResponse({
+				...responseIdentity(emitted),
+				decision: "deny",
+				feedback: "Use the workspace path",
+				kind: "approval_response",
+			}),
+		).toEqual({ accepted: true });
+		await expect(selection).resolves.toBe("Deny");
+		expect(approvalContext.feedback).toBe("Use the workspace path");
 	});
 
 	test("fails closed on digest mismatch, invalid payload, and late responses", async () => {

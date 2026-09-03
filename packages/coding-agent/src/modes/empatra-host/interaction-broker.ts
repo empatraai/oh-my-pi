@@ -107,6 +107,7 @@ export interface EmpatraHostInteractionExpiredEvent {
 export interface EmpatraHostApprovalResponse {
 	decision: "approve" | "deny";
 	digest: string;
+	feedback?: string;
 	kind: "approval_response";
 	requestId: string;
 }
@@ -231,6 +232,7 @@ export class EmpatraHostInteractionBroker {
 				dialogOptions,
 			);
 			if (response.kind !== "approval_response") throw new EmpatraHostInteractionError("invalid_response");
+			if (approval) approval.feedback = response.feedback;
 			return response.decision === "approve" ? "Approve" : "Deny";
 		}
 		if (options.length === 0 || options.length > MAX_SELECT_OPTIONS) {
@@ -663,17 +665,20 @@ function parseResponse(
 	if (!isRecord(value) || value.requestId !== request.requestId || value.digest !== request.digest) return undefined;
 	if (request.kind === "approval") {
 		if (
-			!hasOnlyKeys(value, ["decision", "digest", "kind", "requestId"]) ||
+			!hasOnlyKeys(value, ["decision", "digest", "feedback", "kind", "requestId"]) ||
 			value.kind !== "approval_response" ||
 			(value.decision !== "approve" && value.decision !== "deny")
 		) {
 			return undefined;
 		}
+		const feedback = value.feedback === undefined ? undefined : validFeedback(value.feedback);
+		if (feedback === false) return undefined;
 		return {
 			decision: value.decision,
 			digest: request.digest,
 			kind: "approval_response",
 			requestId: request.requestId,
+			...(feedback === undefined ? {} : { feedback }),
 		};
 	}
 	if (
@@ -692,6 +697,17 @@ function parseResponse(
 		requestId: request.requestId,
 		value: responseValue,
 	};
+}
+
+function validFeedback(value: unknown): string | false {
+	if (typeof value !== "string" || value.length === 0 || encoder.encode(value).byteLength > 4 * 1024) {
+		return false;
+	}
+	for (const character of value) {
+		const codePoint = character.codePointAt(0) ?? 0;
+		if (codePoint < 32 && character !== "\n" && character !== "\r" && character !== "\t") return false;
+	}
+	return value;
 }
 
 function validResponseValue(

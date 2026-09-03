@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	computeEmpatraHostToolCatalogRevision,
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
+	EMPATRA_HOST_APPROVAL_FEEDBACK_CAPABILITY,
 	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
 	EMPATRA_HOST_INLINE_TOOL_CATALOG_CAPABILITY,
@@ -67,6 +68,7 @@ describe("Empatra host protocol", () => {
 			EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 			EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
 			EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
+			EMPATRA_HOST_APPROVAL_FEEDBACK_CAPABILITY,
 			EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
 			EMPATRA_HOST_INLINE_TOOL_CATALOG_CAPABILITY,
 			EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
@@ -688,6 +690,28 @@ describe("Empatra host protocol", () => {
 				}),
 			),
 		).toThrow("interaction response is invalid");
+		expect(
+			parseEmpatraHostCommand(
+				JSON.stringify({
+					...identity,
+					response: { decision: "deny", feedback: "Please use the workspace path", kind: "approval_response" },
+					type: "interaction_respond",
+				}),
+			),
+		).toEqual({
+			...identity,
+			response: { decision: "deny", feedback: "Please use the workspace path", kind: "approval_response" },
+			type: "interaction_respond",
+		});
+		expect(() =>
+			parseEmpatraHostCommand(
+				JSON.stringify({
+					...identity,
+					response: { decision: "deny", feedback: "x".repeat(4 * 1024 + 1), kind: "approval_response" },
+					type: "interaction_respond",
+				}),
+			),
+		).toThrow("feedback is invalid");
 	});
 
 	test("bounds physical input and output frames", () => {

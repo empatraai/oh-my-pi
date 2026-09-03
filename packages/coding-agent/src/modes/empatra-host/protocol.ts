@@ -93,6 +93,8 @@ export const EMPATRA_HOST_THREAD_READ_TARGET_BYTES = 896 * 1024;
 export const EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY = "thread_lifecycle.atomic-v1" as const;
 export const EMPATRA_HOST_NATIVE_PLAN_CAPABILITY = "plan.native-v1" as const;
 export const EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY = "approval.scoped-v1" as const;
+/** Bounded user feedback is carried with a denied/approved interaction response. */
+export const EMPATRA_HOST_APPROVAL_FEEDBACK_CAPABILITY = "approval.feedback-v1" as const;
 export const EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY = "host_tools.dynamic-v1" as const;
 /** Inline host-tool catalog admission for atomic lifecycle and turn start. */
 export const EMPATRA_HOST_INLINE_TOOL_CATALOG_CAPABILITY = "host_tools.inline-v1" as const;
@@ -127,6 +129,7 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
 	EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
+	EMPATRA_HOST_APPROVAL_FEEDBACK_CAPABILITY,
 	EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
 	EMPATRA_HOST_INLINE_TOOL_CATALOG_CAPABILITY,
 	EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
@@ -1194,10 +1197,18 @@ function interactionResponse(
 	| Omit<EmpatraHostUserInputResponse, "digest" | "requestId"> {
 	if (!isRecord(value)) throw new EmpatraHostProtocolError("invalid_request", "interaction response is invalid");
 	if (value.kind === "approval_response") {
-		if (!hasOnlyKeys(value, ["decision", "kind"]) || (value.decision !== "approve" && value.decision !== "deny")) {
+		if (
+			!hasOnlyKeys(value, ["decision", "feedback", "kind"]) ||
+			(value.decision !== "approve" && value.decision !== "deny")
+		) {
 			throw new EmpatraHostProtocolError("invalid_request", "interaction response is invalid");
 		}
-		return { decision: value.decision, kind: "approval_response" };
+		const feedback = planResolutionFeedback(value.feedback);
+		return {
+			decision: value.decision,
+			kind: "approval_response",
+			...(feedback === undefined || feedback === null ? {} : { feedback }),
+		};
 	}
 	if (
 		value.kind !== "user_input_response" ||
