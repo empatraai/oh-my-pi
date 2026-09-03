@@ -54,6 +54,10 @@ import {
 	type EmpatraHostModelRoutingSnapshot,
 	type EmpatraHostModelRoutingWriteCommand,
 } from "./model-routing";
+import {
+	parseEmpatraHostAgentCatalog,
+	type EmpatraHostAgentCatalog,
+} from "./agent-catalog";
 
 export const EMPATRA_HOST_PROTOCOL_VERSION = 6 as const;
 export const EMPATRA_HOST_MAX_FRAME_BYTES = 1024 * 1024;
@@ -246,6 +250,8 @@ export function sanitizeEmpatraHostImageDisplayName(value: string): string {
 }
 
 export interface EmpatraHostInitializeCommand {
+	/** Optional explicit OMP task-agent metadata, accepted only with subagent RPC. */
+	agentCatalog?: EmpatraHostAgentCatalog;
 	capability: string;
 	extensions?: EmpatraHostExtensionDescriptor[];
 	gatewayBaseUrl: string;
@@ -1333,6 +1339,7 @@ function extensionDescriptor(value: unknown): EmpatraHostExtensionDescriptor {
 function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeCommand {
 	if (
 		!hasOnlyKeys(value, [
+			"agentCatalog",
 			"capability",
 			"extensions",
 			"gatewayBaseUrl",
@@ -1382,7 +1389,18 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 		}
 		subagentRpc = { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY };
 	}
+	let agentCatalog: EmpatraHostAgentCatalog | undefined;
+	if (value.agentCatalog !== undefined) {
+		if (subagentRpc === undefined) {
+			throw new EmpatraHostProtocolError(
+				"invalid_request",
+				"agentCatalog requires the negotiated subagent RPC bootstrap",
+			);
+		}
+		agentCatalog = parseEmpatraHostAgentCatalog(value.agentCatalog);
+	}
 	return {
+		...(agentCatalog === undefined ? {} : { agentCatalog }),
 		capability: boundedString(value.capability, "capability", 32, 512),
 		...(value.extensions === undefined ? {} : { extensions: value.extensions.map(extensionDescriptor) }),
 		gatewayBaseUrl: gatewayBaseUrl(value.gatewayBaseUrl),

@@ -1,4 +1,5 @@
 export * from "./atomic-operation-store";
+export * from "./agent-catalog";
 export * from "./cli";
 export * from "./errors";
 export * from "./execution-broker";

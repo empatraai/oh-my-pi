@@ -10,6 +10,7 @@ import {
 	createEmpatraHostSubagentRpcTransport,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
 	createEmpatraHostModelRoutingSnapshot,
+	createEmpatraHostAgentCatalog,
 	EMPATRA_HOST_RESOURCES_CAPABILITY,
 	EMPATRA_HOST_RESOURCES_VERSION,
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
@@ -494,6 +495,46 @@ await new Promise(() => {});`,
 			}),
 		]);
 		expect(received[0]?.skills[0]?.filePath).toBe(path.join(await realpath(skillRoot), "SKILL.md"));
+		await runtime.dispose();
+	});
+
+	test("passes main-injected custom-agent metadata without opening ambient OMP discovery", async () => {
+		const host = await temporaryHost();
+		const agentCatalog = createEmpatraHostAgentCatalog([
+			{
+				description: "Проверяет реализацию",
+				developerInstructions: "Сохраняй границы полномочий и приложи проверки.",
+				model: ["managed-model", "@default"],
+				name: "reviewer",
+				reasoning: "high",
+			},
+		]);
+		const received: EmpatraHostSessionFactoryOptions[] = [];
+		const subagentTransport = createEmpatraHostSubagentRpcTransport({
+			capabilities: [EMPATRA_HOST_SUBAGENT_CAPABILITY],
+			emitEvent: async () => undefined,
+		});
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async input => {
+				received.push(input);
+				return new FakeSession();
+			},
+			subagentRpcTransport: subagentTransport,
+		});
+		await runtime.initialize({
+			...initializeCommand(host.workspace, host.sessions),
+			agentCatalog,
+			subagentRpc: { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY },
+		});
+		await runtime.startThread({
+			cwd: host.workspace,
+			id: "create-agent-catalog-session",
+			modelId: "managed-model",
+			operationId: "operation-agent-catalog-session",
+			systemPrompt: "Empatra system prompt",
+			type: "thread_create",
+		});
+		expect(received[0]?.agentCatalog).toEqual(agentCatalog);
 		await runtime.dispose();
 	});
 

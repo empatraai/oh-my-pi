@@ -27,6 +27,7 @@ import {
 	parseEmpatraHostCapabilities,
 	parseEmpatraHostCommand,
 	serializeEmpatraHostFrame,
+	createEmpatraHostAgentCatalog,
 } from "../src/modes/empatra-host";
 
 const validInitialize: EmpatraHostInitializeCommand = {
@@ -114,6 +115,29 @@ describe("Empatra host protocol", () => {
 				JSON.stringify({ ...validInitialize, subagentRpc: { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY, extra: true } }),
 			),
 		).toThrow("subagentRpc bootstrap is invalid");
+	});
+
+	test("accepts explicit custom-agent metadata only inside the subagent bootstrap", () => {
+		const agentCatalog = createEmpatraHostAgentCatalog([
+			{
+				description: "Проверка",
+				developerInstructions: "Изучи задачу и верни доказательный результат.",
+				model: ["managed-model", "@default"],
+				name: "reviewer",
+				reasoning: "high",
+			},
+		]);
+		const command = parseEmpatraHostCommand(
+			JSON.stringify({
+				...validInitialize,
+				agentCatalog,
+				subagentRpc: { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY },
+			}),
+		);
+		expect(command).toMatchObject({ agentCatalog, subagentRpc: { capability: EMPATRA_HOST_SUBAGENT_CAPABILITY } });
+		expect(() => parseEmpatraHostCommand(JSON.stringify({ ...validInitialize, agentCatalog }))).toThrow(
+			"agentCatalog requires the negotiated subagent RPC bootstrap",
+		);
 	});
 
 	test("accepts only hash-bound explicit extension descriptors", () => {

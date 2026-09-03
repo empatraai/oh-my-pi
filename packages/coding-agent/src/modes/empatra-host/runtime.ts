@@ -84,6 +84,11 @@ import {
 	type EmpatraHostModelRoutingWriteCommand,
 } from "./model-routing";
 import {
+	createEmpatraHostAgentCatalog,
+	validateEmpatraHostAgentCatalogModels,
+	type EmpatraHostAgentCatalog,
+} from "./agent-catalog";
+import {
 	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_FRAMING_CAPABILITY,
 	EMPATRA_HOST_MAX_ASSISTANT_MESSAGES_PER_TURN,
@@ -283,6 +288,8 @@ export interface EmpatraHostSession {
 }
 
 export interface EmpatraHostSessionFactoryOptions {
+	/** Explicit main-owned custom task-agent metadata; no ambient discovery is implied. */
+	agentCatalog: EmpatraHostAgentCatalog;
 	agentDir: string;
 	capability: string;
 	cwd: string;
@@ -313,6 +320,7 @@ export interface EmpatraHostSessionFactoryOptions {
 export type EmpatraHostSessionFactory = (options: EmpatraHostSessionFactoryOptions) => Promise<EmpatraHostSession>;
 
 interface InitializedRuntime {
+	agentCatalog: EmpatraHostAgentCatalog;
 	agentDir: string;
 	atomicOperationStore: EmpatraHostAtomicOperationStore;
 	authStorage: AuthStorage;
@@ -1146,6 +1154,13 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			  }
 			: createEmpatraHostModelRoutingSnapshot();
 		validateEmpatraHostModelRoutingModels(modelRouting, new Set(models.keys()));
+		const agentCatalog = command.agentCatalog
+			? {
+					...command.agentCatalog,
+					agents: structuredClone(command.agentCatalog.agents),
+			  }
+			: createEmpatraHostAgentCatalog();
+		validateEmpatraHostAgentCatalogModels(agentCatalog, new Set(models.keys()));
 		const skills = await resolveMaterializedSkills(command.skills ?? [], sessionDirectory);
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 		await authStorage.reload();
@@ -1187,6 +1202,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			throw new EmpatraHostProtocolError("runtime_error", "Empatra host metadata stores failed to initialize");
 		}
 		this.#initialized = {
+			agentCatalog,
 			agentDir,
 			atomicOperationStore,
 			authStorage,
@@ -2993,6 +3009,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				: undefined;
 		};
 		const session = await this.#sessionFactory({
+			agentCatalog: runtime.agentCatalog,
 			agentDir: runtime.agentDir,
 			capability: runtime.capability,
 			cwd,
