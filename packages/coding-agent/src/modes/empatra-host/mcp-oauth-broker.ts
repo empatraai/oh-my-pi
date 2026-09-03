@@ -5,6 +5,9 @@ import { EMPATRA_HOST_MCP_OAUTH_CAPABILITY } from "./protocol";
 
 /** Versioned main-owned MCP OAuth contract. */
 export const EMPATRA_HOST_MCP_OAUTH_VERSION = 1 as const;
+/** Launch opt-in for the stdio bridge; unset hosts never emit OAuth events. */
+export const EMPATRA_HOST_MCP_OAUTH_RPC_OPT_IN_ENV = "EMPATRA_OMP_MCP_OAUTH_RPC" as const;
+export const EMPATRA_HOST_MCP_OAUTH_RPC_OPT_IN_VALUE = "v1" as const;
 export const EMPATRA_HOST_MCP_OAUTH_MAX_URL_BYTES = 2048;
 export const EMPATRA_HOST_MCP_OAUTH_MAX_SCOPES_BYTES = 8192;
 export const EMPATRA_HOST_MCP_OAUTH_MAX_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;

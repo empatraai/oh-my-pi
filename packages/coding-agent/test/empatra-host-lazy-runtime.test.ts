@@ -14,7 +14,11 @@ import {
 import {
 	type EmpatraHostResourcesBrokerTransport,
 } from "../src/modes/empatra-host/resources";
-import { EMPATRA_HOST_RESOURCES_CAPABILITY } from "../src/modes/empatra-host/protocol";
+import {
+	EMPATRA_HOST_MCP_OAUTH_CAPABILITY,
+	EMPATRA_HOST_RESOURCES_CAPABILITY,
+} from "../src/modes/empatra-host/protocol";
+import type { EmpatraHostMcpOAuthBrokerTransport } from "../src/modes/empatra-host/mcp-oauth-broker";
 
 const initializeCommand: EmpatraHostInitializeCommand = {
 	capability: "c".repeat(48),
@@ -123,5 +127,35 @@ describe("LazyEmpatraHostRuntime", () => {
 		expect(lazy.getAdvertisedCapabilities()).toContain(EMPATRA_HOST_RESOURCES_CAPABILITY);
 		await lazy.initialize(initializeCommand);
 		expect(receivedTransport).toBe(resourcesTransport);
+	});
+
+	test("forwards an explicitly injected MCP OAuth transport and response handler", async () => {
+		const mcpOAuthTransport = {
+			broker: { capability: EMPATRA_HOST_MCP_OAUTH_CAPABILITY },
+			handleResponse: () => undefined,
+			dispose: () => undefined,
+		} as unknown as EmpatraHostMcpOAuthBrokerTransport;
+		let receivedTransport: EmpatraHostMcpOAuthBrokerTransport | undefined;
+		let responseCalls = 0;
+		const runtime = {
+			dispose: async () => undefined,
+			initialize: async () => ({ modelCount: 0, workspaceRootCount: 1 }),
+			setEventSink: () => undefined,
+			setHostToolSink: () => undefined,
+			handleMcpOAuthResponse: () => { responseCalls += 1; },
+		} as unknown as EmpatraHostRuntime;
+		const lazy = new LazyEmpatraHostRuntime(
+			async options => {
+				receivedTransport = options.mcpOAuthTransport;
+				return runtime;
+			},
+			{ mcpOAuthTransport },
+		);
+
+		expect(lazy.getAdvertisedCapabilities()).toContain(EMPATRA_HOST_MCP_OAUTH_CAPABILITY);
+		await lazy.initialize(initializeCommand);
+		lazy.handleMcpOAuthResponse({} as never);
+		expect(receivedTransport).toBe(mcpOAuthTransport);
+		expect(responseCalls).toBe(1);
 	});
 });

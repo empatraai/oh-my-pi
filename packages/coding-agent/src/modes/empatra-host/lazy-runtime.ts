@@ -21,6 +21,10 @@ import type {
 	EmpatraHostResourcesBrokerTransport,
 	EmpatraHostResourcesResponseCommand,
 } from "./resources";
+import type {
+	EmpatraHostMcpOAuthBrokerTransport,
+	EmpatraHostMcpOAuthResponseCommand,
+} from "./mcp-oauth-broker";
 
 export interface EmpatraHostRuntimeFactoryOptions {
 	/**
@@ -31,6 +35,8 @@ export interface EmpatraHostRuntimeFactoryOptions {
 	readonly subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
 	/** Main-owned resource broker transport; absent unless explicitly opted in. */
 	readonly resourcesTransport?: EmpatraHostResourcesBrokerTransport;
+	/** Main-owned MCP OAuth broker transport; absent unless explicitly opted in. */
+	readonly mcpOAuthTransport?: EmpatraHostMcpOAuthBrokerTransport;
 }
 
 type RuntimeFactory = (options: EmpatraHostRuntimeFactoryOptions) => Promise<EmpatraHostRuntime>;
@@ -72,11 +78,13 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 					EMPATRA_HOST_SUBAGENT_CAPABILITY,
 					EMPATRA_HOST_FRAMING_CAPABILITY,
 					...(this.#runtimeOptions.resourcesTransport ? [this.#runtimeOptions.resourcesTransport.broker.capability] : []),
+					...(this.#runtimeOptions.mcpOAuthTransport ? [this.#runtimeOptions.mcpOAuthTransport.broker.capability] : []),
 				]
 			: [
 					...EMPATRA_HOST_CAPABILITIES,
 					EMPATRA_HOST_FRAMING_CAPABILITY,
 					...(this.#runtimeOptions.resourcesTransport ? [this.#runtimeOptions.resourcesTransport.broker.capability] : []),
+					...(this.#runtimeOptions.mcpOAuthTransport ? [this.#runtimeOptions.mcpOAuthTransport.broker.capability] : []),
 				];
 	}
 
@@ -181,6 +189,12 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 		const runtime = this.#requireRuntime();
 		if (!runtime.handleResourcesResponse) throw new Error("Resource broker transport is unavailable");
 		runtime.handleResourcesResponse(command);
+	}
+
+	handleMcpOAuthResponse(command: EmpatraHostMcpOAuthResponseCommand): void {
+		const runtime = this.#requireRuntime();
+		if (!runtime.handleMcpOAuthResponse) throw new Error("MCP OAuth broker transport is unavailable");
+		runtime.handleMcpOAuthResponse(command);
 	}
 
 	interruptTurn(command: Extract<EmpatraHostCommand, { type: "turn_interrupt" }>): Promise<unknown> {

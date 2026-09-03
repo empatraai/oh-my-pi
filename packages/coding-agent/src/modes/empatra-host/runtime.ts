@@ -101,6 +101,7 @@ import {
 } from "./subagent-broker";
 import { type EmpatraHostThreadMetadata, EmpatraHostThreadMetadataStore } from "./thread-metadata-store";
 import type { EmpatraHostResourcesBrokerTransport, EmpatraHostResourcesScope } from "./resources";
+import type { EmpatraHostMcpOAuthBrokerTransport } from "./mcp-oauth-broker";
 import { type EmpatraHostProjectedMessage, projectThreadMessages } from "./thread-projection";
 import { EmpatraHostThreadRegistry } from "./thread-registry";
 import { rollbackEmpatraHostThread } from "./thread-rollback";
@@ -962,6 +963,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	readonly #subagentController?: EmpatraHostSubagentController;
 	readonly #subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
 	readonly #resourcesTransport?: EmpatraHostResourcesBrokerTransport;
+	readonly #mcpOAuthTransport?: EmpatraHostMcpOAuthBrokerTransport;
 	#disposing = false;
 	#eventSink: (event: EmpatraHostEvent) => Promise<void> = async () => {
 		throw new EmpatraHostProtocolError("event_sink_missing", "Empatra host event sink is not connected");
@@ -982,6 +984,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
 			subagentRunner?: EmpatraHostSubagentRunner;
 			resourcesTransport?: EmpatraHostResourcesBrokerTransport;
+			mcpOAuthTransport?: EmpatraHostMcpOAuthBrokerTransport;
 		} = {},
 	) {
 		if (options.subagentController && options.subagentRunner) {
@@ -1000,6 +1003,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				: undefined);
 		this.#subagentRpcTransport = options.subagentRpcTransport;
 		this.#resourcesTransport = options.resourcesTransport;
+		this.#mcpOAuthTransport = options.mcpOAuthTransport;
 		this.#hostToolsConnection = new EmpatraHostToolsConnection();
 		this.#interactionBroker = new EmpatraHostInteractionBroker({
 			emitRequest: request => this.#emitInteractionRequest(request),
@@ -1011,8 +1015,14 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			? [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY, EMPATRA_HOST_FRAMING_CAPABILITY]
 			: [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_FRAMING_CAPABILITY];
 		return this.#resourcesTransport
-			? [...capabilities, this.#resourcesTransport.broker.capability]
-			: capabilities;
+			? [
+					...capabilities,
+					this.#resourcesTransport.broker.capability,
+					...(this.#mcpOAuthTransport ? [this.#mcpOAuthTransport.broker.capability] : []),
+				]
+			: this.#mcpOAuthTransport
+				? [...capabilities, this.#mcpOAuthTransport.broker.capability]
+				: capabilities;
 	}
 
 	spawnSubagent(command: EmpatraHostSubagentSpawnCommand): Promise<unknown> {
@@ -1073,6 +1083,13 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			throw new EmpatraHostProtocolError("resources_unavailable", "OMP host resources transport is not connected");
 		}
 		this.#resourcesTransport.handleResponse(command);
+	}
+
+	handleMcpOAuthResponse(command: Extract<EmpatraHostCommand, { type: "mcp_oauth_response" }>): void {
+		if (!this.#mcpOAuthTransport) {
+			throw new EmpatraHostProtocolError("mcp_oauth_unavailable", "OMP MCP OAuth transport is not connected");
+		}
+		this.#mcpOAuthTransport.handleResponse(command);
 	}
 
 	async initialize(command: EmpatraHostInitializeCommand): Promise<unknown> {
@@ -2092,6 +2109,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		await this.#subagentController?.dispose();
 		this.#subagentRpcTransport?.dispose();
 		this.#resourcesTransport?.dispose();
+		this.#mcpOAuthTransport?.dispose();
 		this.#threadReadProjectionCache.clear();
 		this.#interactionBroker.dispose();
 		for (const pending of this.#pendingPlanResolutions.values()) {
