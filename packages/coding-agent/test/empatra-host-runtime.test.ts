@@ -252,8 +252,7 @@ describe("Empatra host AgentSession runtime", () => {
 		session.onPrompt = () => new Promise<void>(resolve => {
 			finishPrompt = resolve;
 		});
-		let transport!: ReturnType<typeof createEmpatraHostSubagentRpcTransport>;
-		transport = createEmpatraHostSubagentRpcTransport({
+		const transport = createEmpatraHostSubagentRpcTransport({
 			capabilities: [EMPATRA_HOST_SUBAGENT_CAPABILITY],
 			emitEvent: async event => {
 				events.push(event);

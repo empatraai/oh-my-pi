@@ -9,8 +9,7 @@ import {
 describe("Empatra host subagent RPC transport", () => {
 	test("emits a bounded sidecar request and resolves its correlated response", async () => {
 		const events: EmpatraHostSubagentRequestEvent[] = [];
-		let transport!: ReturnType<typeof createEmpatraHostSubagentRpcTransport>;
-		transport = createEmpatraHostSubagentRpcTransport({
+		const transport = createEmpatraHostSubagentRpcTransport({
 			capabilities: [EMPATRA_HOST_SUBAGENT_CAPABILITY],
 			emitEvent: async event => {
 				events.push(event);
