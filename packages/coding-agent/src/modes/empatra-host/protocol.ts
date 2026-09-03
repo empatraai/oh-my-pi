@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { EmpatraHostProtocolError, EmpatraHostRegistryError } from "./errors";
 import type {
 	EmpatraHostApprovalResponse,
+	EmpatraHostInteractionExpiredEvent,
 	EmpatraHostInteractionRequest,
 	EmpatraHostUserInputResponse,
 } from "./interaction-broker";
@@ -639,6 +640,8 @@ export interface EmpatraHostInteractionRequestedEvent {
 	type: "host_event";
 }
 
+export type { EmpatraHostInteractionExpiredEvent } from "./interaction-broker";
+
 /** A durable, digest-bound plan proposal emitted before execution can begin. */
 export interface EmpatraHostPlanProposalEvent {
 	digest: string;
@@ -735,6 +738,7 @@ export type EmpatraHostEvent =
 	| EmpatraHostMcpOAuthRequestedEvent
 	| EmpatraHostResourcesRequestedEvent
 	| EmpatraHostInteractionRequestedEvent
+	| EmpatraHostInteractionExpiredEvent
 	| EmpatraHostPlanProposalEvent
 	| EmpatraHostToolExecutionEndEvent
 	| EmpatraHostToolExecutionStartEvent
@@ -1877,6 +1881,20 @@ export function serializeEmpatraHostFrame(
 	}
 	if (frame.type === "host_event" && frame.event === "resources_requested") {
 		parseEmpatraHostResourcesRequestedEvent(frame);
+	}
+	if (frame.type === "host_event" && frame.event === "interaction_expired") {
+		if (
+			!hasOnlyKeys(frame, ["digest", "event", "generation", "requestId", "sequence", "threadId", "turnId", "type"])
+			|| typeof frame.digest !== "string"
+			|| !/^sha256:[a-f0-9]{64}$/.test(frame.digest)
+		) {
+			throw new EmpatraHostProtocolError("invalid_request", "interaction_expired is invalid");
+		}
+		boundedInteger(frame.generation, "generation", 1, Number.MAX_SAFE_INTEGER);
+		boundedInteger(frame.sequence, "sequence", 1, Number.MAX_SAFE_INTEGER);
+		identifier(frame.requestId, "requestId");
+		identifier(frame.threadId, "threadId");
+		identifier(frame.turnId, "turnId");
 	}
 	if (frame.type === "host_event" && frame.event === "image_generation_requested") {
 		if (!parseEmpatraHostImageGenerationRequestedEvent(frame)) {

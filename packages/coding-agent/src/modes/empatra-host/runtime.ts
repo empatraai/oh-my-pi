@@ -1007,6 +1007,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		this.#hostToolsConnection = new EmpatraHostToolsConnection();
 		this.#interactionBroker = new EmpatraHostInteractionBroker({
 			emitRequest: request => this.#emitInteractionRequest(request),
+			emitTimeout: request => this.#emitInteractionExpired(request),
 		});
 	}
 
@@ -2970,6 +2971,32 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			event: "interaction_requested",
 			generation: activeTurn.generation,
 			request,
+			sequence: activeTurn.sequence,
+			threadId: request.threadId,
+			turnId: request.turnId,
+			type: "host_event",
+		});
+	}
+
+	/** Emits only the identity receipt needed to clear the host's durable UI state. */
+	async #emitInteractionExpired(request: EmpatraHostInteractionRequest): Promise<void> {
+		const state = this.#registry.get(request.threadId);
+		const activeTurn = state?.handle.activeTurn;
+		if (
+			!state
+			|| state.generation !== request.generation
+			|| state.activeTurnId !== request.turnId
+			|| !activeTurn
+			|| !activeTurn.acceptingEvents
+			|| activeTurn.generation !== request.generation
+			|| activeTurn.turnId !== request.turnId
+		) return;
+		activeTurn.sequence += 1;
+		await this.#enqueueEvent(state.handle, {
+			digest: request.digest,
+			event: "interaction_expired",
+			generation: activeTurn.generation,
+			requestId: request.requestId,
 			sequence: activeTurn.sequence,
 			threadId: request.threadId,
 			turnId: request.turnId,

@@ -281,11 +281,15 @@ describe("EmpatraHostInteractionBroker", () => {
 		let timeoutStarts = 0;
 		let timeoutResets = 0;
 		let timeouts = 0;
+		const expired: EmpatraHostInteractionRequest[] = [];
 		const broker = new EmpatraHostInteractionBroker({
 			createRequestId: sequentialIds(),
 			defaultTimeoutMs: 20,
 			emitRequest: request => {
 				requests.push(request);
+			},
+			emitTimeout: request => {
+				expired.push(request);
 			},
 		});
 
@@ -322,6 +326,7 @@ describe("EmpatraHostInteractionBroker", () => {
 		});
 		await expect(timedOut).rejects.toMatchObject({ code: "timeout" });
 		expect({ timeoutResets, timeoutStarts, timeouts }).toEqual({ timeoutResets: 1, timeoutStarts: 1, timeouts: 1 });
+		expect(expired).toEqual([timeoutRequest]);
 		expect(broker.pendingCount).toBe(0);
 	});
 

@@ -658,6 +658,23 @@ describe("Empatra host protocol", () => {
 		).toThrow("planText is invalid");
 	});
 
+	test("serializes a secret-free interaction timeout receipt", () => {
+		const event = {
+			digest: `sha256:${"a".repeat(64)}`,
+			event: "interaction_expired" as const,
+			generation: 2,
+			requestId: "interaction-1",
+			sequence: 4,
+			threadId: "thread-1",
+			turnId: "turn-1",
+			type: "host_event" as const,
+		} satisfies EmpatraHostEvent;
+		const serialized = serializeEmpatraHostFrame(event);
+		expect(JSON.parse(serialized)).toEqual(event);
+		expect(serialized).not.toContain("rawInput");
+		expect(serialized).not.toContain("prompt");
+	});
+
 	test("serializes the strict secret-free tool event contract", () => {
 		const event = {
 			argumentsText: '{"path":"src/main.ts"}',

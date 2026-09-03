@@ -92,6 +92,18 @@ export type EmpatraHostInteractionRequest =
 	| EmpatraHostSelectRequest
 	| EmpatraHostTextInputRequest;
 
+/** Secret-free notification emitted when a pending interaction expires. */
+export interface EmpatraHostInteractionExpiredEvent {
+	digest: string;
+	event: "interaction_expired";
+	generation: number;
+	requestId: string;
+	sequence: number;
+	threadId: string;
+	turnId: string;
+	type: "host_event";
+}
+
 export interface EmpatraHostApprovalResponse {
 	decision: "approve" | "deny";
 	digest: string;
@@ -165,6 +177,8 @@ export interface EmpatraHostInteractionBrokerOptions {
 	createRequestId?: () => string;
 	defaultTimeoutMs?: number;
 	emitRequest: (request: EmpatraHostInteractionRequest) => Promise<void> | void;
+	/** Notifies the owning host without exposing interaction input or credentials. */
+	emitTimeout?: (request: EmpatraHostInteractionRequest) => Promise<void> | void;
 	now?: () => number;
 }
 
@@ -175,6 +189,7 @@ export class EmpatraHostInteractionBroker {
 	readonly #createRequestId: () => string;
 	readonly #defaultTimeoutMs: number;
 	readonly #emitRequest: EmpatraHostInteractionBrokerOptions["emitRequest"];
+	readonly #emitTimeout: EmpatraHostInteractionBrokerOptions["emitTimeout"];
 	readonly #now: () => number;
 	readonly #pending = new Map<string, PendingInteraction>();
 	readonly #retiredRequestIds = new Set<string>();
@@ -186,6 +201,7 @@ export class EmpatraHostInteractionBroker {
 		this.#createRequestId = options.createRequestId ?? (() => `interaction-${Bun.randomUUIDv7()}`);
 		this.#defaultTimeoutMs = validTimeout(options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS);
 		this.#emitRequest = options.emitRequest;
+		this.#emitTimeout = options.emitTimeout;
 		this.#now = options.now ?? Date.now;
 	}
 
@@ -493,6 +509,9 @@ export class EmpatraHostInteractionBroker {
 	#reject(pending: PendingInteraction, code: EmpatraHostInteractionErrorCode): void {
 		if (!this.#pending.has(pending.request.requestId)) return;
 		this.#remove(pending);
+		if (code === "timeout" && this.#emitTimeout) {
+			invokeAsyncCallback(this.#emitTimeout, pending.request);
+		}
 		pending.reject(new EmpatraHostInteractionError(code));
 	}
 
@@ -769,5 +788,16 @@ function invokeCallback(callback: (() => void) | undefined): void {
 		callback?.();
 	} catch {
 		// UI callbacks are observers and cannot change host-owned interaction state.
+	}
+}
+
+function invokeAsyncCallback<T>(
+	callback: ((value: T) => Promise<void> | void) | undefined,
+	value: T,
+): void {
+	try {
+		void Promise.resolve(callback?.(value)).catch(() => undefined);
+	} catch {
+		// Transport observers cannot change host-owned interaction state.
 	}
 }
