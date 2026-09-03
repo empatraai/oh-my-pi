@@ -660,6 +660,7 @@ export interface EmpatraHostToolFileChange {
 	diff: string;
 	diffTruncated: boolean;
 	kind: "create" | "delete" | "modify" | "move";
+	movePath?: string;
 	path: string;
 }
 

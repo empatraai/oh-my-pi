@@ -126,6 +126,38 @@ describe("Empatra host tool projection", () => {
 		}
 	});
 
+	test("preserves a bounded rename destination in move snapshots", () => {
+		const projected = projectEmpatraHostToolEvent(
+			{
+				partialResult: {
+					content: [],
+					details: {
+						perFileResults: [{
+							diff: "",
+							op: "move",
+							path: "src/new.ts",
+							sourcePath: "src/old.ts",
+						}],
+					},
+				},
+				toolCallId: "call-move",
+				toolName: "apply_patch",
+				type: "tool_execution_update",
+			} as Extract<AgentSessionEvent, { type: "tool_execution_update" }>,
+			{ previousOutputText: "", workspaceRoots: ["/workspace/project"] },
+		);
+		if (projected.payload.phase !== "update" || projected.payload.update.type !== "changes_snapshot") {
+			throw new Error("Expected move changes snapshot");
+		}
+		expect(projected.payload.update.changes).toEqual([{
+			diff: "",
+			diffTruncated: false,
+			kind: "move",
+			movePath: "src/new.ts",
+			path: "src/old.ts",
+		}]);
+	});
+
 	test("rejects forged durable records containing raw secrets", () => {
 		expect(
 			parseEmpatraHostPersistedToolEvent({

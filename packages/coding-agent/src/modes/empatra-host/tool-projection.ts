@@ -217,8 +217,15 @@ function changeKind(value: unknown): EmpatraHostToolFileChange["kind"] {
 
 function projectChange(value: unknown, workspaceRoots: readonly string[]): EmpatraHostToolFileChange | undefined {
 	if (!isRecord(value) || typeof value.path !== "string" || typeof value.diff !== "string") return undefined;
-	const safePath = projectWorkspacePath(value.path, workspaceRoots);
+	const kind = changeKind(value.op);
+	const sourcePath = kind === "move" && typeof value.sourcePath === "string" ? value.sourcePath : value.path;
+	const safePath = projectWorkspacePath(sourcePath, workspaceRoots);
 	if (!safePath) return undefined;
+	const rawMovePath = kind === "move"
+		? (typeof value.move === "string" ? value.move : typeof value.rename === "string" ? value.rename : value.sourcePath ? value.path : undefined)
+		: undefined;
+	const safeMovePath = rawMovePath === undefined ? undefined : projectWorkspacePath(rawMovePath, workspaceRoots);
+	if (rawMovePath !== undefined && !safeMovePath) return undefined;
 	const projected = truncateJsonString(
 		redactText(value.diff, workspaceRoots),
 		EMPATRA_HOST_MAX_TOOL_FILE_CHANGE_BYTES,
@@ -226,7 +233,8 @@ function projectChange(value: unknown, workspaceRoots: readonly string[]): Empat
 	return {
 		diff: projected.text,
 		diffTruncated: projected.truncated,
-		kind: changeKind(value.op),
+		kind,
+		...(safeMovePath === undefined ? {} : { movePath: safeMovePath }),
 		path: safePath,
 	};
 }
@@ -436,6 +444,7 @@ export function parseEmpatraHostPersistedToolEvent(value: unknown): EmpatraHostP
 				!isSafePersistedText(change.diff) ||
 				path.isAbsolute(change.path) ||
 				projectWorkspacePath(change.path, []) !== change.path ||
+				(change.movePath !== undefined && (typeof change.movePath !== "string" || path.isAbsolute(change.movePath) || projectWorkspacePath(change.movePath, []) !== change.movePath)) ||
 				(change.kind !== "create" && change.kind !== "delete" && change.kind !== "modify" && change.kind !== "move")
 			)
 				return undefined;
