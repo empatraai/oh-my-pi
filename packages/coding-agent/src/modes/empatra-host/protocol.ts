@@ -912,7 +912,7 @@ export function parseEmpatraHostCapabilities(value: unknown): readonly EmpatraHo
 	return capabilities;
 }
 
-function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+function hasOnlyKeys(value: object, keys: readonly string[]): boolean {
 	const allowed = new Set(keys);
 	return Object.keys(value).every(key => allowed.has(key));
 }
