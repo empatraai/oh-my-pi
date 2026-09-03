@@ -315,7 +315,9 @@ export interface EmpatraHostToolDefinition {
 
 export interface EmpatraHostToolsReplaceCommand {
 	catalogRevision: string;
+	expectedGeneration?: number;
 	id: string;
+	threadId?: string;
 	tools: EmpatraHostToolDefinition[];
 	type: "host_tools_replace";
 }
@@ -1378,15 +1380,19 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 		}
 		case "host_tools_replace":
 			if (
-				!hasOnlyKeys(parsed, ["catalogRevision", "id", "tools", "type"]) ||
+				!hasOnlyKeys(parsed, ["catalogRevision", "expectedGeneration", "id", "threadId", "tools", "type"]) ||
 				!Array.isArray(parsed.tools) ||
-				parsed.tools.length > EMPATRA_HOST_MAX_HOST_TOOLS
+				parsed.tools.length > EMPATRA_HOST_MAX_HOST_TOOLS ||
+				(parsed.threadId !== undefined && typeof parsed.threadId !== "string") ||
+				(parsed.expectedGeneration !== undefined && (typeof parsed.expectedGeneration !== "number" || !Number.isSafeInteger(parsed.expectedGeneration) || parsed.expectedGeneration < 0))
 			) {
 				throw new EmpatraHostProtocolError("invalid_request", "host_tools_replace is invalid");
 			}
 			return {
 				catalogRevision: catalogRevision(parsed.catalogRevision),
+				...(parsed.expectedGeneration === undefined ? {} : { expectedGeneration: boundedInteger(parsed.expectedGeneration, "expectedGeneration", 0, Number.MAX_SAFE_INTEGER) }),
 				id,
+				...(parsed.threadId === undefined ? {} : { threadId: identifier(parsed.threadId, "threadId") }),
 				tools: parsed.tools.map(hostToolDefinition),
 				type: "host_tools_replace",
 			};

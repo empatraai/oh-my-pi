@@ -464,6 +464,7 @@ interface ThreadHandle {
 	session: EmpatraHostSession;
 	sessionManager: SessionManager;
 	hostTools: EmpatraHostSessionTools;
+	hostToolCatalog?: Readonly<{ revision: string; tools: readonly EmpatraHostToolDefinition[] }>;
 	model: Model<"openai-responses">;
 	modelContextWindow: number;
 	streamAbortStarted: boolean;
@@ -973,6 +974,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	readonly #operationCommandTails = new Map<string, Promise<void>>();
 	readonly #threadReadProjectionCache = new Map<string, TurnAlignedThreadReadProjection>();
 	readonly #threadCommandTails = new Map<string, Promise<void>>();
+	readonly #threadHostToolCatalogs = new Map<string, Readonly<{ revision: string; tools: readonly EmpatraHostToolDefinition[] }>>();
 	readonly #pendingPlanResolutions = new Map<string, PendingPlanResolution>();
 	#hostToolCatalog?: Readonly<{ revision: string; tools: readonly EmpatraHostToolDefinition[] }>;
 
@@ -1202,10 +1204,47 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	}
 
 	async replaceHostTools(command: EmpatraHostToolsReplaceCommand): Promise<unknown> {
+		if (command.threadId !== undefined) {
+			return this.#withThreadCommand(command.threadId, async () => {
+				validateEmpatraHostToolCatalog(command.tools, command.catalogRevision);
+				const state = await this.#registry.open(command.threadId!, async () => {
+					const session = await this.#findThread(command.threadId!);
+					return this.#openThread(session.path);
+				});
+				if (command.expectedGeneration !== undefined && state.generation !== command.expectedGeneration) {
+					throw new EmpatraHostProtocolError("stale_generation", "Host tool catalog targets a stale thread generation");
+				}
+				if (state.handle.activeTurn !== null) {
+					throw new EmpatraHostProtocolError("turn_active", "Cannot replace a host tool catalog during an active turn");
+				}
+				const previous = state.handle.hostToolCatalog;
+				const previousHostNames = state.handle.hostTools.getToolNames();
+				const nativeNames = new Set(
+					(state.handle.session.getAllToolNames?.() ?? []).filter(name => !previousHostNames.has(name)),
+				);
+				if (command.tools.some(tool => nativeNames.has(tool.name))) {
+					throw new EmpatraHostProtocolError("host_tool_catalog_invalid", "Host tool conflicts with a session tool");
+				}
+				const catalog = { revision: command.catalogRevision, tools: command.tools } as const;
+				const tools = state.handle.hostTools.replaceCatalog(catalog.tools, catalog.revision);
+				try {
+					await state.handle.session.refreshRpcHostTools?.(tools);
+				} catch (error) {
+					const rollbackTools = previous?.tools ?? [];
+					const rollbackRevision = previous?.revision ?? command.catalogRevision;
+					const rollback = state.handle.hostTools.replaceCatalog(rollbackTools, rollbackRevision);
+					await state.handle.session.refreshRpcHostTools?.(rollback).catch(() => undefined);
+					throw error;
+				}
+				state.handle.hostToolCatalog = catalog;
+				this.#threadHostToolCatalogs.set(command.threadId!, catalog);
+				return { catalogRevision: command.catalogRevision, toolNames: command.tools.map(tool => tool.name) };
+			});
+		}
 		return this.#withOperationCommand("empatra-host-tools", async () => {
 			validateEmpatraHostToolCatalog(command.tools, command.catalogRevision);
 			const previous = this.#hostToolCatalog;
-			const handles = [...this.#handles];
+			const handles = [...this.#handles].filter(handle => !this.#threadHostToolCatalogs.has(handle.threadId));
 			for (const handle of handles) {
 				const previousHostNames = handle.hostTools.getToolNames();
 				const nativeNames = new Set(
@@ -2315,7 +2354,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				activeReasoningContentIndexes: new Map(),
 				assistantMessageCount: 0,
 				...(options.atomicOperation ? { atomicOperation: options.atomicOperation } : {}),
-				catalogRevision: this.#hostToolCatalog?.revision ?? null,
+				catalogRevision: state.handle.hostToolCatalog?.revision ?? this.#hostToolCatalog?.revision ?? null,
 				generation: activeGeneration,
 				imageAdmissions: options.preparedImages ? [options.preparedImages] : [],
 				openTools: new Map(),
@@ -2904,6 +2943,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			sessionManager,
 			settings,
 			hostTools,
+			hostToolCatalog: this.#threadHostToolCatalogs.get(sessionManager.getSessionId()) ?? this.#hostToolCatalog,
 			model,
 			modelContextWindow: model.contextWindow,
 			streamAbortStarted: false,
@@ -2913,7 +2953,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		handleRef.current = handle;
 		try {
 			return await this.#withOperationCommand("empatra-host-tools", async () => {
-				const catalog = this.#hostToolCatalog;
+				const catalog = handle.hostToolCatalog;
 				if (catalog) {
 					const nativeNames = new Set(session.getAllToolNames?.() ?? []);
 					if (catalog.tools.some(tool => nativeNames.has(tool.name))) {

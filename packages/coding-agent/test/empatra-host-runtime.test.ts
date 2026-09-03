@@ -988,6 +988,86 @@ await new Promise(() => {});`,
 		await runtime.dispose();
 	});
 
+	test("keeps target-aware host tool catalogs isolated across resident threads", async () => {
+		const host = await temporaryHost();
+		const sessions: FakeSession[] = [];
+		const runtime = new EmpatraHostAgentRuntime({
+			sessionFactory: async () => {
+				const session = new FakeSession();
+				sessions.push(session);
+				return session;
+			},
+		});
+		await runtime.initialize(initializeCommand(host.workspace, host.sessions));
+		const first = (await runtime.startThread({
+			cwd: host.workspace,
+			id: "scoped-first",
+			modelId: "managed-model",
+			operationId: "scoped-first-operation",
+			systemPrompt: "System",
+			type: "thread_create",
+		})) as { generation: number; threadId: string };
+		const second = (await runtime.startThread({
+			cwd: host.workspace,
+			id: "scoped-second",
+			modelId: "managed-model",
+			operationId: "scoped-second-operation",
+			systemPrompt: "System",
+			type: "thread_create",
+		})) as { generation: number; threadId: string };
+		const firstTools = [{
+			description: "First scoped operation",
+			name: "scoped_first",
+			parameters: { additionalProperties: false, properties: {}, type: "object" },
+		}];
+		const secondTools = [{
+			description: "Second scoped operation",
+			name: "scoped_second",
+			parameters: { additionalProperties: false, properties: {}, type: "object" },
+		}];
+		await Promise.all([
+			runtime.replaceHostTools({
+				catalogRevision: computeEmpatraHostToolCatalogRevision(firstTools),
+				expectedGeneration: first.generation,
+				id: "scoped-first-catalog",
+				threadId: first.threadId,
+				tools: firstTools,
+				type: "host_tools_replace",
+			}),
+			runtime.replaceHostTools({
+				catalogRevision: computeEmpatraHostToolCatalogRevision(secondTools),
+				expectedGeneration: second.generation,
+				id: "scoped-second-catalog",
+				threadId: second.threadId,
+				tools: secondTools,
+				type: "host_tools_replace",
+			}),
+		]);
+		expect(sessions.map(session => session.rpcTools.map(tool => tool.name))).toEqual([
+			["scoped_first"],
+			["scoped_second"],
+		]);
+		await expect(runtime.replaceHostTools({
+			catalogRevision: computeEmpatraHostToolCatalogRevision(firstTools),
+			expectedGeneration: first.generation + 1,
+			id: "scoped-stale-generation",
+			threadId: first.threadId,
+			tools: firstTools,
+			type: "host_tools_replace",
+		})).rejects.toMatchObject({ code: "stale_generation" });
+		await runtime.replaceHostTools({
+			catalogRevision: computeEmpatraHostToolCatalogRevision([]),
+			id: "global-catalog",
+			tools: [],
+			type: "host_tools_replace",
+		});
+		expect(sessions.map(session => session.rpcTools.map(tool => tool.name))).toEqual([
+			["scoped_first"],
+			["scoped_second"],
+		]);
+		await runtime.dispose();
+	});
+
 	test("recovers a safely persisted host tool left open by a crashed runtime as failed", async () => {
 		const host = await temporaryHost();
 		const managers: EmpatraHostSessionFactoryOptions[] = [];

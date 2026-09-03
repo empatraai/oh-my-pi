@@ -176,6 +176,25 @@ describe("Empatra host protocol", () => {
 				JSON.stringify({ catalogRevision, id: "catalog-1", tools, type: "host_tools_replace" }),
 			),
 		).toEqual({ catalogRevision, id: "catalog-1", tools, type: "host_tools_replace" });
+		expect(
+			parseEmpatraHostCommand(
+				JSON.stringify({
+					catalogRevision,
+					expectedGeneration: 0,
+					id: "catalog-scoped",
+					threadId: "thread-1",
+					tools,
+					type: "host_tools_replace",
+				}),
+			),
+		).toEqual({
+			catalogRevision,
+			expectedGeneration: 0,
+			id: "catalog-scoped",
+			threadId: "thread-1",
+			tools,
+			type: "host_tools_replace",
+		});
 		const correlation = {
 			catalogRevision,
 			generation: 4,
