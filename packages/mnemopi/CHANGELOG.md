@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- Updated the workspace security overrides to `adm-zip@0.6.0`, `sharp@0.35.4`, and `tar@7.5.22`, addressing the current OSV advisories in the OMP dependency graph. The `fastembed` ESM entry point is patched to use the named `tar` exports required by `tar@7` while preserving its existing API.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

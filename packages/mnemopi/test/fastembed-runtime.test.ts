@@ -38,6 +38,26 @@ describe("fastembed runtime version pins", () => {
 		expect(plan.versionKey).not.toContain("forced-ort");
 	});
 
+	test("workspace archive-parser overrides stay on patched releases", async () => {
+		expect(rootManifest.overrides).toMatchObject({
+			"adm-zip": "0.6.0",
+			sharp: "0.35.4",
+			tar: "7.5.22",
+		});
+
+		const requireTest = createRequire(import.meta.url);
+		for (const name of ["adm-zip", "sharp", "tar"] as const) {
+			const manifest: { version?: unknown } = requireTest(`${name}/package.json`);
+			expect(manifest.version).toBe(rootManifest.overrides[name]);
+		}
+
+		const tarModule = await import("tar");
+		expect(typeof tarModule.x).toBe("function");
+		const fastembedManifest = requireTest.resolve("fastembed/package.json");
+		const fastembedEsm = await Bun.file(path.join(path.dirname(fastembedManifest), "lib/esm/fastembed.js")).text();
+		expect(fastembedEsm).toContain('import * as tar from "tar";');
+	});
+
 	test("Windows preload selects fastembed's ORT DLL before inherited paths", async () => {
 		const requireTest = createRequire(import.meta.url);
 		const fastembedManifest = requireTest.resolve("fastembed/package.json");

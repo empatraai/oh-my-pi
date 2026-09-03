@@ -185,7 +185,10 @@
 		"typescript": "catalog:"
 	},
 	"overrides": {
-		"@ark/schema": "0.56.2"
+		"@ark/schema": "0.56.2",
+		"adm-zip": "0.6.0",
+		"sharp": "0.35.4",
+		"tar": "7.5.22"
 	},
 	"lint-staged": {
 		"packages/*/src/**/*.{ts,tsx}": [
@@ -208,6 +211,7 @@
 	"packageManager": "bun@1.4.0",
 	"patchedDependencies": {
 		"@ark/schema@0.56.2": "patches/@ark%2Fschema@0.56.2.patch",
-		"puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch"
+		"puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch",
+		"fastembed@2.1.0": "patches/fastembed@2.1.0.patch"
 	}
 }
