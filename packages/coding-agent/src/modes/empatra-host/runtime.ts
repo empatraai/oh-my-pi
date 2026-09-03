@@ -76,6 +76,14 @@ import type {
 	EmpatraHostTurnSummary,
 } from "./protocol";
 import {
+	createEmpatraHostModelRoutingSnapshot,
+	parseEmpatraHostModelRoutingWrite,
+	validateEmpatraHostModelRoutingModels,
+	type EmpatraHostModelRoutingReadCommand,
+	type EmpatraHostModelRoutingSnapshot,
+	type EmpatraHostModelRoutingWriteCommand,
+} from "./model-routing";
+import {
 	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_FRAMING_CAPABILITY,
 	EMPATRA_HOST_MAX_ASSISTANT_MESSAGES_PER_TURN,
@@ -316,6 +324,7 @@ interface InitializedRuntime {
 	modelRegistry: ModelRegistry;
 	metadataStore: EmpatraHostThreadMetadataStore;
 	modelDefinitions: ReadonlyMap<string, EmpatraHostModel>;
+	modelRouting: EmpatraHostModelRoutingSnapshot;
 	models: ReadonlyMap<string, Model<"openai-responses">>;
 	skills: readonly Skill[];
 	policy: EmpatraHostWorkspacePolicy;
@@ -1129,10 +1138,25 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		if (process.platform !== "win32") await chmod(agentDir, 0o700);
 		const models = new Map(command.models.map(model => [model.id, toModel(model, command.gatewayBaseUrl)]));
 		const modelDefinitions = new Map(command.models.map(model => [model.id, model]));
+		const modelRouting = command.modelRouting
+			? {
+					...command.modelRouting,
+					modelRoles: { ...command.modelRouting.modelRoles },
+					taskAgentModelOverrides: structuredClone(command.modelRouting.taskAgentModelOverrides),
+			  }
+			: createEmpatraHostModelRoutingSnapshot();
+		validateEmpatraHostModelRoutingModels(modelRouting, new Set(models.keys()));
 		const skills = await resolveMaterializedSkills(command.skills ?? [], sessionDirectory);
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 		await authStorage.reload();
-		const settings = Settings.isolated({ "tools.approvalMode": "always-ask" }, { agentDir, cwd: policy.roots[0] });
+		const settings = Settings.isolated(
+			{
+				"tools.approvalMode": "always-ask",
+				modelRoles: modelRouting.modelRoles,
+				"task.agentModelOverrides": modelRouting.taskAgentModelOverrides,
+			},
+			{ agentDir, cwd: policy.roots[0] },
+		);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "injected-models.yml"), {
 			ignoreLocalModelConfig: true,
 			settings,
@@ -1177,6 +1201,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			modelRegistry,
 			metadataStore,
 			modelDefinitions,
+			modelRouting,
 			models,
 			skills,
 			policy,
@@ -1188,6 +1213,39 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			modelCount: models.size,
 			workspaceRootCount: policy.roots.length,
 		};
+	}
+
+	/** Return the immutable-in-practice, main-owned routing snapshot. */
+	async getModelRouting(_command: EmpatraHostModelRoutingReadCommand): Promise<EmpatraHostModelRoutingSnapshot> {
+		return structuredClone(this.#requireInitialized().modelRouting);
+	}
+
+	/**
+	 * Apply a complete routing snapshot after optimistic-concurrency checking.
+	 * The host updates only in-memory Settings instances; Electron main remains
+	 * the sole durable writer and is responsible for persisting its own source.
+	 */
+	async updateModelRouting(command: EmpatraHostModelRoutingWriteCommand): Promise<EmpatraHostModelRoutingSnapshot> {
+		const runtime = this.#requireInitialized();
+		if (command.expectedRevision !== runtime.modelRouting.revision) {
+			throw new EmpatraHostProtocolError(
+				"settings_conflict",
+				"Model routing settings changed since the requested snapshot was read",
+			);
+		}
+		const write = parseEmpatraHostModelRoutingWrite({
+			modelRoles: command.modelRoles,
+			taskAgentModelOverrides: command.taskAgentModelOverrides,
+			version: command.version,
+		});
+		validateEmpatraHostModelRoutingModels(write, new Set(runtime.models.keys()));
+		const next = createEmpatraHostModelRoutingSnapshot(write);
+		runtime.modelRouting = next;
+		for (const handle of this.#handles) {
+			handle.settings.override("modelRoles", next.modelRoles);
+			handle.settings.override("task.agentModelOverrides", next.taskAgentModelOverrides);
+		}
+		return structuredClone(next);
 	}
 
 	/**
@@ -2909,7 +2967,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			throw new EmpatraHostProtocolError("model_invalid", "Injected model is missing its context window");
 		}
 		const settings = Settings.isolated(
-			{ "tools.approvalMode": defaultApprovalMode },
+			{
+				"tools.approvalMode": defaultApprovalMode,
+				modelRoles: runtime.modelRouting.modelRoles,
+				"task.agentModelOverrides": runtime.modelRouting.taskAgentModelOverrides,
+			},
 			{ agentDir: runtime.agentDir, cwd },
 		);
 		const handleRef: { current: ThreadHandle | undefined } = { current: undefined };
@@ -2965,6 +3027,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				? {}
 				: { executionBroker: this.#executionBrokerTransport.broker, executionScope }),
 		});
+		// A settings write may have completed while the injected session factory
+		// was awaiting provider/session setup. Reconcile once at the hand-off so
+		// a newly resident thread cannot retain a stale routing snapshot.
+		settings.override("modelRoles", runtime.modelRouting.modelRoles);
+		settings.override("task.agentModelOverrides", runtime.modelRouting.taskAgentModelOverrides);
 		const hostTools = this.#hostToolsConnection.createSession((): EmpatraHostToolScope | undefined => {
 			const handle = handleRef.current;
 			const activeTurn = handle?.activeTurn;

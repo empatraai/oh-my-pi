@@ -9,6 +9,7 @@ import {
 	createEmpatraHostResourcesBrokerTransport,
 	createEmpatraHostSubagentRpcTransport,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
+	createEmpatraHostModelRoutingSnapshot,
 	EMPATRA_HOST_RESOURCES_CAPABILITY,
 	EMPATRA_HOST_RESOURCES_VERSION,
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
@@ -241,6 +242,41 @@ describe("Empatra host AgentSession runtime", () => {
 			version: EMPATRA_HOST_RESOURCES_VERSION,
 		});
 		expect(await pending).toMatchObject({ resources: [] });
+		await runtime.dispose();
+	});
+
+	test("keeps model routing main-mediated, catalog-bound, and revisioned", async () => {
+		const host = await temporaryHost();
+		const initial = createEmpatraHostModelRoutingSnapshot({
+			modelRoles: { default: "managed-model" },
+			taskAgentModelOverrides: { worker: ["managed-model", "@default"] },
+			version: 1,
+		});
+		const runtime = new EmpatraHostAgentRuntime({ sessionFactory: async () => new FakeSession() });
+		await runtime.initialize({ ...initializeCommand(host.workspace, host.sessions), modelRouting: initial });
+		expect(await runtime.getModelRouting({ id: "routing-read", type: "settings_model_routing_read" })).toEqual(initial);
+
+		const next = createEmpatraHostModelRoutingSnapshot({
+			modelRoles: { default: "alternate-model" },
+			taskAgentModelOverrides: {},
+			version: 1,
+		});
+		await expect(
+			runtime.updateModelRouting({
+				...next,
+				expectedRevision: initial.revision,
+				id: "routing-write",
+				type: "settings_model_routing_write",
+			}),
+		).resolves.toEqual(next);
+		await expect(
+			runtime.updateModelRouting({
+				...initial,
+				expectedRevision: initial.revision,
+				id: "routing-stale-write",
+				type: "settings_model_routing_write",
+			}),
+		).rejects.toMatchObject({ code: "settings_conflict" });
 		await runtime.dispose();
 	});
 

@@ -8,6 +8,7 @@ export * from "./interaction-broker";
 export * from "./mcp-oauth-broker";
 export * from "./resources";
 export * from "./media-input";
+export * from "./model-routing";
 export * from "./protocol";
 export * from "./runtime";
 export * from "./server";

@@ -3,6 +3,7 @@ import { LineTooLongError, readLines } from "@oh-my-pi/pi-utils";
 import { EmpatraHostProtocolError } from "./errors";
 import {
 	EMPATRA_HOST_CAPABILITIES,
+	EMPATRA_HOST_MODEL_ROUTING_CAPABILITY,
 	EMPATRA_HOST_MCP_OAUTH_CAPABILITY,
 	EMPATRA_HOST_RESOURCES_CAPABILITY,
 	EMPATRA_HOST_MAX_FRAME_BYTES,
@@ -17,6 +18,10 @@ import {
 	serializeEmpatraHostFrame,
 } from "./protocol";
 import type { EmpatraHostResourcesResponseCommand } from "./resources";
+import type {
+	EmpatraHostModelRoutingReadCommand,
+	EmpatraHostModelRoutingWriteCommand,
+} from "./model-routing";
 import { encodeEmpatraHostFrames, EmpatraHostFrameDecoder } from "./frame";
 import type {
 	EmpatraHostSubagentCloseCommand,
@@ -43,6 +48,8 @@ export interface EmpatraHostRuntime {
 	getAtomicOperationStatus(
 		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
 	): Promise<unknown>;
+	getModelRouting(command: EmpatraHostModelRoutingReadCommand): Promise<unknown>;
+	updateModelRouting(command: EmpatraHostModelRoutingWriteCommand): Promise<unknown>;
 	handleExecutionBrokerResponse(command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void;
 	/** Completes a main-owned MCP OAuth request; no credential material is accepted. */
 	handleMcpOAuthResponse?(command: Extract<EmpatraHostCommand, { type: "mcp_oauth_response" }>): void;
@@ -321,6 +328,16 @@ export async function runEmpatraHostServer(options: EmpatraHostServerOptions): P
 				return options.runtime.listThreadTurns(command);
 			case "atomic_operation_status":
 				return options.runtime.getAtomicOperationStatus(command);
+			case "settings_model_routing_read":
+				if (!advertisedCapabilities.includes(EMPATRA_HOST_MODEL_ROUTING_CAPABILITY)) {
+					throw new EmpatraHostProtocolError("settings_unavailable", "Model routing settings were not negotiated by the main host");
+				}
+				return options.runtime.getModelRouting(command);
+			case "settings_model_routing_write":
+				if (!advertisedCapabilities.includes(EMPATRA_HOST_MODEL_ROUTING_CAPABILITY)) {
+					throw new EmpatraHostProtocolError("settings_unavailable", "Model routing settings were not negotiated by the main host");
+				}
+				return options.runtime.updateModelRouting(command);
 			case "goal_get":
 				return options.runtime.getThreadGoal(command);
 			case "goal_set":

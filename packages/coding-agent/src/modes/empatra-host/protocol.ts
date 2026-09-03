@@ -45,6 +45,15 @@ import {
 	type EmpatraHostSubagentRpcBootstrap,
 	type EmpatraHostSubagentResponseCommand,
 } from "./subagent-broker";
+import {
+	EMPATRA_HOST_MODEL_ROUTING_CAPABILITY,
+	parseEmpatraHostModelRoutingReadCommand,
+	parseEmpatraHostModelRoutingSnapshot,
+	parseEmpatraHostModelRoutingWriteCommand,
+	type EmpatraHostModelRoutingReadCommand,
+	type EmpatraHostModelRoutingSnapshot,
+	type EmpatraHostModelRoutingWriteCommand,
+} from "./model-routing";
 
 export const EMPATRA_HOST_PROTOCOL_VERSION = 6 as const;
 export const EMPATRA_HOST_MAX_FRAME_BYTES = 1024 * 1024;
@@ -108,6 +117,8 @@ export const EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY = "execution_broker.v1" as
 export const EMPATRA_HOST_MCP_OAUTH_CAPABILITY = "mcp.oauth.main-owned-v1" as const;
 /** Main-owned resource catalog/read lane; config and credentials never cross the host boundary. */
 export const EMPATRA_HOST_RESOURCES_CAPABILITY = "resources.main-owned-v1" as const;
+/** Main-mediated OMP model role and task override settings. */
+export { EMPATRA_HOST_MODEL_ROUTING_CAPABILITY } from "./model-routing";
 export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
@@ -120,6 +131,7 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY,
 	EMPATRA_HOST_TURN_CONFIGURATION_CAPABILITY,
 	EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
+	EMPATRA_HOST_MODEL_ROUTING_CAPABILITY,
 ] as const;
 export type EmpatraHostCapability = (typeof EMPATRA_HOST_CAPABILITIES)[number];
 export type EmpatraHostAdvertisedCapability =
@@ -128,7 +140,8 @@ export type EmpatraHostAdvertisedCapability =
 	| typeof EMPATRA_HOST_FRAMING_CAPABILITY
 	| typeof EMPATRA_HOST_MCP_OAUTH_CAPABILITY
 	| typeof EMPATRA_HOST_RESOURCES_CAPABILITY
-	| typeof EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY;
+	| typeof EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY
+	| typeof EMPATRA_HOST_MODEL_ROUTING_CAPABILITY;
 const EMPATRA_HOST_CAPABILITY_SET = new Set<string>(EMPATRA_HOST_CAPABILITIES);
 const EMPATRA_HOST_ADVERTISED_CAPABILITY_SET = new Set<string>([
 	...EMPATRA_HOST_CAPABILITIES,
@@ -136,6 +149,7 @@ const EMPATRA_HOST_ADVERTISED_CAPABILITY_SET = new Set<string>([
 	EMPATRA_HOST_FRAMING_CAPABILITY,
 	EMPATRA_HOST_MCP_OAUTH_CAPABILITY,
 	EMPATRA_HOST_RESOURCES_CAPABILITY,
+	EMPATRA_HOST_MODEL_ROUTING_CAPABILITY,
 ]);
 
 const textEncoder = new TextEncoder();
@@ -236,6 +250,8 @@ export interface EmpatraHostInitializeCommand {
 	extensions?: EmpatraHostExtensionDescriptor[];
 	gatewayBaseUrl: string;
 	id: string;
+	/** Optional main-owned model-routing snapshot; omitted means empty maps. */
+	modelRouting?: EmpatraHostModelRoutingSnapshot;
 	models: EmpatraHostModel[];
 	skills?: EmpatraHostSkill[];
 	protocolVersion: typeof EMPATRA_HOST_PROTOCOL_VERSION;
@@ -557,6 +573,8 @@ export type EmpatraHostCommand =
 	| EmpatraHostMcpOAuthResponseCommand
 	| EmpatraHostResourcesResponseCommand
 	| EmpatraHostInitializeCommand
+	| EmpatraHostModelRoutingReadCommand
+	| EmpatraHostModelRoutingWriteCommand
 	| EmpatraHostImageGenerationResponseCommand
 	| EmpatraHostInteractionActivityCommand
 	| EmpatraHostInteractionCancelCommand
@@ -842,6 +860,8 @@ const SAFE_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
 	rollback_unavailable: "OMP cannot roll back the requested number of turns",
 	runtime_error: "OMP host operation failed",
 	server_busy: "OMP host command queue is full",
+	settings_conflict: "Model routing settings changed since the requested snapshot was read",
+	settings_unavailable: "Model routing settings are unavailable for this host",
 	subagent_unavailable: "OMP subagent lifecycle was not negotiated by the main host",
 	stale_generation: "The command targets a stale thread generation",
 	stale_cursor: "OMP host pagination cursor is stale",
@@ -1317,6 +1337,7 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 			"extensions",
 			"gatewayBaseUrl",
 			"id",
+			"modelRouting",
 			"models",
 			"skills",
 			"protocolVersion",
@@ -1366,6 +1387,7 @@ function parseInitialize(value: Record<string, unknown>): EmpatraHostInitializeC
 		...(value.extensions === undefined ? {} : { extensions: value.extensions.map(extensionDescriptor) }),
 		gatewayBaseUrl: gatewayBaseUrl(value.gatewayBaseUrl),
 		id: identifier(value.id, "id"),
+		...(value.modelRouting === undefined ? {} : { modelRouting: parseEmpatraHostModelRoutingSnapshot(value.modelRouting) }),
 		models,
 		protocolVersion: EMPATRA_HOST_PROTOCOL_VERSION,
 		sessionDirectory: absolutePath(value.sessionDirectory, "sessionDirectory"),
@@ -1465,6 +1487,10 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			return parseEmpatraHostMcpOAuthResponseCommand(parsed);
 		case "resources_response":
 			return parseEmpatraHostResourcesResponseCommand(parsed);
+		case "settings_model_routing_read":
+			return parseEmpatraHostModelRoutingReadCommand(parsed, id);
+		case "settings_model_routing_write":
+			return parseEmpatraHostModelRoutingWriteCommand(parsed, id);
 		case "host_shutdown":
 			if (!hasOnlyKeys(parsed, ["id", "type"])) {
 				throw new EmpatraHostProtocolError("invalid_request", `${parsed.type} contains unknown fields`);

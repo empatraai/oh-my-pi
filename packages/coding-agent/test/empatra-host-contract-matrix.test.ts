@@ -56,6 +56,7 @@ function runtime(calls: string[]): EmpatraHostRuntime {
 		deleteThread: called("delete"),
 		dispose: async () => undefined,
 		getAtomicOperationStatus: called("atomic-status"),
+		getModelRouting: called("model-routing-read"),
 		initialize: async () => ({ initialized: true }),
 		handleExecutionBrokerResponse: command => calls.push(`execution:${command.type}`),
 		handleHostToolCancel: command => calls.push(`tool-cancel:${command.type}`),
@@ -81,6 +82,7 @@ function runtime(calls: string[]): EmpatraHostRuntime {
 		startThreadAndTurn: called("create-start"),
 		startTurn: called("turn-start"),
 		steerTurn: called("steer"),
+		updateModelRouting: called("model-routing-write"),
 		unarchiveThread: called("unarchive"),
 	};
 }

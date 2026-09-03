@@ -23,6 +23,10 @@ import type {
 } from "./resources";
 import type { EmpatraHostExecutionBrokerTransport } from "./execution-broker";
 import type {
+	EmpatraHostModelRoutingReadCommand,
+	EmpatraHostModelRoutingWriteCommand,
+} from "./model-routing";
+import type {
 	EmpatraHostMcpOAuthBrokerTransport,
 	EmpatraHostMcpOAuthResponseCommand,
 } from "./mcp-oauth-broker";
@@ -151,6 +155,14 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 		command: Extract<EmpatraHostCommand, { type: "atomic_operation_status" }>,
 	): Promise<unknown> {
 		return this.#requireRuntime().getAtomicOperationStatus(command);
+	}
+
+	getModelRouting(command: EmpatraHostModelRoutingReadCommand): Promise<unknown> {
+		return this.#requireRuntime().getModelRouting(command);
+	}
+
+	updateModelRouting(command: EmpatraHostModelRoutingWriteCommand): Promise<unknown> {
+		return this.#requireRuntime().updateModelRouting(command);
 	}
 
 	cancelInteraction(command: Extract<EmpatraHostCommand, { type: "interaction_cancel" }>): Promise<unknown> {

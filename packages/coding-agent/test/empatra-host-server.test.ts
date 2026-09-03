@@ -68,6 +68,9 @@ function runtime(overrides: Partial<EmpatraHostRuntime> = {}): EmpatraHostRuntim
 		async getAtomicOperationStatus() {
 			return { operationId: "operation-1", status: "missing" };
 		},
+		async getModelRouting() {
+			return { modelRoles: {}, taskAgentModelOverrides: {}, version: 1, revision: `sha256:${"0".repeat(64)}` };
+		},
 		async initialize() {
 			return { initialized: true };
 		},
@@ -132,6 +135,9 @@ function runtime(overrides: Partial<EmpatraHostRuntime> = {}): EmpatraHostRuntim
 		},
 		async steerTurn() {
 			return { steered: true };
+		},
+		async updateModelRouting() {
+			return { modelRoles: {}, taskAgentModelOverrides: {}, version: 1, revision: `sha256:${"0".repeat(64)}` };
 		},
 		async unarchiveThread() {
 			return { archived: false };
@@ -274,6 +280,54 @@ describe("Empatra host protocol server", () => {
 		expect(invalidOutput.map(frame => JSON.parse(frame))).toContainEqual(
 			expect.objectContaining({ code: "invalid_request", id: null, success: false }),
 		);
+	});
+
+	test("dispatches negotiated main-mediated model routing reads and writes", async () => {
+		const output: string[] = [];
+		const calls: string[] = [];
+		const hostRuntime = runtime({
+			async getModelRouting(command) {
+				calls.push(`${command.id}:${command.type}`);
+				return {
+					modelRoles: {},
+					taskAgentModelOverrides: {},
+					version: 1,
+					revision: `sha256:${"0".repeat(64)}`,
+				};
+			},
+			async updateModelRouting(command) {
+				calls.push(`${command.id}:${command.type}`);
+				return {
+					modelRoles: command.modelRoles,
+					taskAgentModelOverrides: command.taskAgentModelOverrides,
+					version: 1,
+					revision: `sha256:${"1".repeat(64)}`,
+				};
+			},
+		});
+		await runEmpatraHostServer({
+			input: inputStream([
+				initializeCommand(),
+				{ id: "routing-read", type: "settings_model_routing_read" },
+				{
+					expectedRevision: `sha256:${"0".repeat(64)}`,
+					id: "routing-write",
+					modelRoles: { default: "managed-model" },
+					taskAgentModelOverrides: {},
+					type: "settings_model_routing_write",
+					version: 1,
+				},
+				{ id: "routing-shutdown", type: "host_shutdown" },
+			]),
+			runtime: hostRuntime,
+			write: async frame => {
+				output.push(frame);
+			},
+		});
+		const frames = output.map(frame => JSON.parse(frame) as Record<string, unknown>);
+		expect(calls).toEqual(["routing-read:settings_model_routing_read", "routing-write:settings_model_routing_write"]);
+		expect(frames).toContainEqual(expect.objectContaining({ id: "routing-read", success: true }));
+		expect(frames).toContainEqual(expect.objectContaining({ id: "routing-write", success: true }));
 	});
 
 	test("writes turn acceptance before the first event and bounds the activation barrier", async () => {
