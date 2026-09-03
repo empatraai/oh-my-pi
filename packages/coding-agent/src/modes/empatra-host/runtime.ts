@@ -1134,6 +1134,12 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		if (this.#initialized) {
 			throw new EmpatraHostProtocolError("already_initialized", "Empatra host runtime is already initialized");
 		}
+		if (command.agentCatalog !== undefined && command.subagentRpc === undefined) {
+			throw new EmpatraHostProtocolError(
+				"invalid_request",
+				"agentCatalog requires the negotiated subagent RPC bootstrap",
+			);
+		}
 		const policy = await EmpatraHostWorkspacePolicy.create(command.workspaceRoots);
 		const requestedSessionDirectory = path.resolve(command.sessionDirectory);
 		await mkdir(requestedSessionDirectory, { mode: 0o700, recursive: true });
