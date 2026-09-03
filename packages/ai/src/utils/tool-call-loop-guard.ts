@@ -79,28 +79,39 @@ export class ToolCallLoopGuard {
 	/** Records one completed turn and returns the threshold hit, if any. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
-		if (toolCalls.length !== 1 || this.#exemptTools.has(toolCalls[0]!.name)) {
+		if (toolCalls.length === 0) {
+			this.#lastHash = undefined;
+			this.#count = 0;
+			return null;
+		}
+		if (toolCalls.every(toolCall => this.#exemptTools.has(toolCall.name))) {
 			this.#lastHash = undefined;
 			this.#count = 0;
 			return null;
 		}
 
-		const toolCall = toolCalls[0]!;
-		const canonicalArgs = JSON.stringify(canonicalizeToolCallValue(toolCall.arguments));
-		const hash = `${toolCall.name}:${canonicalArgs}`;
-		if (hash === this.#lastHash) {
+		// Parallel calls are semantically a batch; sort their canonical forms so
+		// provider ordering differences cannot bypass the guard.
+		const turnHash = JSON.stringify(
+			toolCalls
+				.map(toolCall => JSON.stringify([toolCall.name, canonicalizeToolCallValue(toolCall.arguments)]))
+				.sort(),
+		);
+		if (turnHash === this.#lastHash) {
 			this.#count++;
 		} else {
-			this.#lastHash = hash;
+			this.#lastHash = turnHash;
 			this.#count = 1;
 		}
 
 		if (this.#count !== this.#threshold) return null;
+		const reportCall = toolCalls.find(toolCall => !this.#exemptTools.has(toolCall.name)) ?? toolCalls[0]!;
+		const canonicalArgs = JSON.stringify(canonicalizeToolCallValue(reportCall.arguments));
 		return {
 			kind: "repeated_tool_call",
-			toolName: toolCall.name,
+			toolName: reportCall.name,
 			count: this.#count,
-			resultSummary: summarizeToolResult(turn.toolResults, toolCall.id),
+			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(canonicalArgs, ARGUMENT_SUMMARY_LIMIT),
 		};
 	}
