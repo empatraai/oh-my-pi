@@ -21,6 +21,7 @@ import type {
 	EmpatraHostResourcesBrokerTransport,
 	EmpatraHostResourcesResponseCommand,
 } from "./resources";
+import type { EmpatraHostExecutionBrokerTransport } from "./execution-broker";
 import type {
 	EmpatraHostMcpOAuthBrokerTransport,
 	EmpatraHostMcpOAuthResponseCommand,
@@ -35,6 +36,7 @@ export interface EmpatraHostRuntimeFactoryOptions {
 	readonly subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
 	/** Main-owned resource broker transport; absent unless explicitly opted in. */
 	readonly resourcesTransport?: EmpatraHostResourcesBrokerTransport;
+	readonly executionBrokerTransport?: EmpatraHostExecutionBrokerTransport;
 	/** Main-owned MCP OAuth broker transport; absent unless explicitly opted in. */
 	readonly mcpOAuthTransport?: EmpatraHostMcpOAuthBrokerTransport;
 }
@@ -79,12 +81,14 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 					EMPATRA_HOST_FRAMING_CAPABILITY,
 					...(this.#runtimeOptions.resourcesTransport ? [this.#runtimeOptions.resourcesTransport.broker.capability] : []),
 					...(this.#runtimeOptions.mcpOAuthTransport ? [this.#runtimeOptions.mcpOAuthTransport.broker.capability] : []),
+					...(this.#runtimeOptions.executionBrokerTransport ? [this.#runtimeOptions.executionBrokerTransport.broker.capability] : []),
 				]
 			: [
 					...EMPATRA_HOST_CAPABILITIES,
 					EMPATRA_HOST_FRAMING_CAPABILITY,
 					...(this.#runtimeOptions.resourcesTransport ? [this.#runtimeOptions.resourcesTransport.broker.capability] : []),
 					...(this.#runtimeOptions.mcpOAuthTransport ? [this.#runtimeOptions.mcpOAuthTransport.broker.capability] : []),
+					...(this.#runtimeOptions.executionBrokerTransport ? [this.#runtimeOptions.executionBrokerTransport.broker.capability] : []),
 				];
 	}
 

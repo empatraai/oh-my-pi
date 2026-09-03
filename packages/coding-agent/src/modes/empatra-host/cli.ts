@@ -1,6 +1,11 @@
 import { claimRpcInput } from "../rpc/rpc-input";
 import { LazyEmpatraHostRuntime, type EmpatraHostRuntimeFactoryOptions } from "./lazy-runtime";
-import { EMPATRA_HOST_MCP_OAUTH_CAPABILITY, EMPATRA_HOST_RESOURCES_CAPABILITY, serializeEmpatraHostFrame } from "./protocol";
+import {
+	EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY,
+	EMPATRA_HOST_MCP_OAUTH_CAPABILITY,
+	EMPATRA_HOST_RESOURCES_CAPABILITY,
+	serializeEmpatraHostFrame,
+} from "./protocol";
 import {
 	createEmpatraHostMcpOAuthBrokerTransport,
 	EMPATRA_HOST_MCP_OAUTH_RPC_OPT_IN_ENV,
@@ -18,6 +23,10 @@ import {
 	EMPATRA_HOST_SUBAGENT_RPC_OPT_IN_ENV,
 	EMPATRA_HOST_SUBAGENT_RPC_OPT_IN_VALUE,
 } from "./subagent-broker";
+import { createEmpatraHostExecutionBrokerTransport } from "./execution-broker";
+
+const EMPATRA_HOST_EXECUTION_RPC_OPT_IN_ENV = "EMPATRA_OMP_EXECUTION_BROKER";
+const EMPATRA_HOST_EXECUTION_RPC_OPT_IN_VALUE = "v1";
 
 export function isEmpatraHostSubagentRpcOptedIn(
 	environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -35,6 +44,12 @@ export function isEmpatraHostMcpOAuthRpcOptedIn(
 	environment: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean {
 	return environment[EMPATRA_HOST_MCP_OAUTH_RPC_OPT_IN_ENV] === EMPATRA_HOST_MCP_OAUTH_RPC_OPT_IN_VALUE;
+}
+
+export function isEmpatraHostExecutionBrokerOptedIn(
+	environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+	return environment[EMPATRA_HOST_EXECUTION_RPC_OPT_IN_ENV] === EMPATRA_HOST_EXECUTION_RPC_OPT_IN_VALUE;
 }
 
 /**
@@ -82,17 +97,26 @@ export async function runEmpatraHostCli(options: EmpatraHostRuntimeFactoryOption
 				emitRequest: async event => write(serializeEmpatraHostFrame(event)),
 			})
 	);
+	const executionBrokerTransport = options.executionBrokerTransport ?? (
+		!isEmpatraHostExecutionBrokerOptedIn()
+			? undefined
+			: createEmpatraHostExecutionBrokerTransport({
+					capabilities: [EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY],
+					emitRequest: async event => write(serializeEmpatraHostFrame(event)),
+				})
+	);
 	try {
 		await runEmpatraHostServer({
 			input: claimRpcInput(),
 			runtime: new LazyEmpatraHostRuntime(
 				undefined,
-				transport || resourcesTransport || mcpOAuthTransport
+				transport || resourcesTransport || mcpOAuthTransport || executionBrokerTransport
 					? {
 						...options,
 						...(transport ? { subagentRpcTransport: transport } : {}),
 						...(resourcesTransport ? { resourcesTransport } : {}),
 						...(mcpOAuthTransport ? { mcpOAuthTransport } : {}),
+						...(executionBrokerTransport ? { executionBrokerTransport } : {}),
 					}
 					: options,
 			),
@@ -102,6 +126,7 @@ export async function runEmpatraHostCli(options: EmpatraHostRuntimeFactoryOption
 		transport?.dispose();
 		resourcesTransport?.dispose();
 		mcpOAuthTransport?.dispose();
+		executionBrokerTransport?.dispose();
 		await writeTail;
 	}
 }

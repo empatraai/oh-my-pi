@@ -3,13 +3,13 @@ import { EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY } from "./protocol";
 import { randomUUID } from "node:crypto";
 
 /**
- * Reserved capability for the future main-owned execution broker.
+ * Capability for the optional main-owned execution broker.
  *
  * This is intentionally not part of `EMPATRA_HOST_CAPABILITIES` yet. OMP's
  * native shell/filesystem adapters execute in the OMP process today, while an
  * Empatra desktop host must keep those powers in Electron main. A controller
  * must therefore never infer this capability from the existence of this
- * module; it is advertised only after a real broker is wired and tested.
+ * module; it is advertised only after a real transport is wired and opted in.
  */
 export type EmpatraHostExecutionBrokerCapability = typeof EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY;
 
@@ -126,8 +126,8 @@ export interface EmpatraHostExecutionBrokerTransport {
 
 /**
  * Assert that this process has completed the capability negotiation required
- * before constructing a broker transport. The OMP host does not advertise the
- * capability today, so callers that omit the negotiated list fail closed.
+ * before constructing a broker transport. Callers that omit the negotiated
+ * list fail closed, keeping standalone OMP execution disabled by default.
  */
 export function assertEmpatraHostExecutionBrokerCapability(capabilities: readonly string[]): void {
 	if (!capabilities.includes(EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY)) {

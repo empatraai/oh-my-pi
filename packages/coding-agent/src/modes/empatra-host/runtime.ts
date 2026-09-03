@@ -103,6 +103,13 @@ import {
 import { type EmpatraHostThreadMetadata, EmpatraHostThreadMetadataStore } from "./thread-metadata-store";
 import type { EmpatraHostResourcesBrokerTransport, EmpatraHostResourcesScope } from "./resources";
 import type { EmpatraHostMcpOAuthBrokerTransport } from "./mcp-oauth-broker";
+import {
+	type EmpatraHostExecutionBroker,
+	type EmpatraHostExecutionScope,
+	type EmpatraHostExecutionBrokerResponseCommand,
+	type EmpatraHostExecutionBrokerTransport,
+} from "./execution-broker";
+import { createEmpatraHostExecutionTools } from "./execution-tools";
 import { type EmpatraHostProjectedMessage, projectThreadMessages } from "./thread-projection";
 import { EmpatraHostThreadRegistry } from "./thread-registry";
 import { rollbackEmpatraHostThread } from "./thread-rollback";
@@ -289,6 +296,10 @@ export interface EmpatraHostSessionFactoryOptions {
 	resourcesBroker?: EmpatraHostResourcesBrokerTransport["broker"];
 	/** Active resource request scope, owned by Electron main. */
 	resourcesScope?: () => EmpatraHostResourcesScope | undefined;
+	/** Main-owned native filesystem/process broker; absent unless negotiated. */
+	executionBroker?: EmpatraHostExecutionBroker;
+	/** Active native execution scope, owned by Electron main. */
+	executionScope?: () => EmpatraHostExecutionScope | undefined;
 }
 
 export type EmpatraHostSessionFactory = (options: EmpatraHostSessionFactoryOptions) => Promise<EmpatraHostSession>;
@@ -885,9 +896,14 @@ async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions):
 		options.subagentRpc?.capability === EMPATRA_HOST_SUBAGENT_CAPABILITY &&
 		options.subagentRpcBroker !== undefined &&
 		options.subagentRpcScope !== undefined;
+	const executionEnabled = options.executionBroker !== undefined && options.executionScope !== undefined;
+	const toolNames = [
+		...(subagentRpcEnabled ? ["task"] : []),
+		...(executionEnabled ? ["read", "write", "bash"] : []),
+	];
 	const { session, setToolUIContext } = await createAgentSession({
 		agentDir: options.agentDir,
-		allowRestrictedCustomTools: false,
+		allowRestrictedCustomTools: executionEnabled,
 		allowRestrictedExtensions: options.extensionPaths.length > 0,
 		autoApprove: false,
 		contextFiles: [],
@@ -924,7 +940,8 @@ async function defaultSessionFactory(options: EmpatraHostSessionFactoryOptions):
 		systemPrompt: options.systemPrompt,
 		subagentRpcBroker: subagentRpcEnabled ? options.subagentRpcBroker : undefined,
 		subagentRpcScope: subagentRpcEnabled ? options.subagentRpcScope : undefined,
-		toolNames: subagentRpcEnabled ? ["task"] : [],
+		customTools: executionEnabled ? createEmpatraHostExecutionTools(options.executionBroker!, options.executionScope!) : [],
+		toolNames,
 	});
 	return {
 		abort: session.abort.bind(session),
@@ -966,6 +983,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	readonly #subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
 	readonly #resourcesTransport?: EmpatraHostResourcesBrokerTransport;
 	readonly #mcpOAuthTransport?: EmpatraHostMcpOAuthBrokerTransport;
+	readonly #executionBrokerTransport?: EmpatraHostExecutionBrokerTransport;
 	#disposing = false;
 	#eventSink: (event: EmpatraHostEvent) => Promise<void> = async () => {
 		throw new EmpatraHostProtocolError("event_sink_missing", "Empatra host event sink is not connected");
@@ -988,6 +1006,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 			subagentRunner?: EmpatraHostSubagentRunner;
 			resourcesTransport?: EmpatraHostResourcesBrokerTransport;
 			mcpOAuthTransport?: EmpatraHostMcpOAuthBrokerTransport;
+			executionBrokerTransport?: EmpatraHostExecutionBrokerTransport;
 		} = {},
 	) {
 		if (options.subagentController && options.subagentRunner) {
@@ -1007,6 +1026,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		this.#subagentRpcTransport = options.subagentRpcTransport;
 		this.#resourcesTransport = options.resourcesTransport;
 		this.#mcpOAuthTransport = options.mcpOAuthTransport;
+		this.#executionBrokerTransport = options.executionBrokerTransport;
 		this.#hostToolsConnection = new EmpatraHostToolsConnection();
 		this.#interactionBroker = new EmpatraHostInteractionBroker({
 			emitRequest: request => this.#emitInteractionRequest(request),
@@ -1018,15 +1038,12 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		const capabilities = this.#subagentController || this.#subagentRpcTransport
 			? [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY, EMPATRA_HOST_FRAMING_CAPABILITY]
 			: [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_FRAMING_CAPABILITY];
-		return this.#resourcesTransport
-			? [
-					...capabilities,
-					this.#resourcesTransport.broker.capability,
-					...(this.#mcpOAuthTransport ? [this.#mcpOAuthTransport.broker.capability] : []),
-				]
-			: this.#mcpOAuthTransport
-				? [...capabilities, this.#mcpOAuthTransport.broker.capability]
-				: capabilities;
+		return [
+			...capabilities,
+			...(this.#resourcesTransport ? [this.#resourcesTransport.broker.capability] : []),
+			...(this.#mcpOAuthTransport ? [this.#mcpOAuthTransport.broker.capability] : []),
+			...(this.#executionBrokerTransport ? [this.#executionBrokerTransport.broker.capability] : []),
+		];
 	}
 
 	spawnSubagent(command: EmpatraHostSubagentSpawnCommand): Promise<unknown> {
@@ -1068,11 +1085,11 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 	 * future injected transport; the default runtime has no local executor and
 	 * therefore fails closed instead of interpreting the payload itself.
 	 */
-	handleExecutionBrokerResponse(_command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void {
-		throw new EmpatraHostProtocolError(
-			"execution_broker_unavailable",
-			"OMP execution broker transport is not connected",
-		);
+	handleExecutionBrokerResponse(command: EmpatraHostExecutionBrokerResponseCommand): void {
+		if (!this.#executionBrokerTransport) {
+			throw new EmpatraHostProtocolError("execution_broker_unavailable", "OMP execution broker transport is not connected");
+		}
+		this.#executionBrokerTransport.handleResponse(command);
 	}
 
 	handleSubagentResponse(command: EmpatraHostSubagentResponseCommand): void {
@@ -2163,6 +2180,7 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 		this.#subagentRpcTransport?.dispose();
 		this.#resourcesTransport?.dispose();
 		this.#mcpOAuthTransport?.dispose();
+		this.#executionBrokerTransport?.dispose();
 		this.#threadReadProjectionCache.clear();
 		this.#interactionBroker.dispose();
 		for (const pending of this.#pendingPlanResolutions.values()) {
@@ -2905,6 +2923,13 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 				parentTurnId: activeTurn.turnId,
 			};
 		};
+		const executionScope = (): EmpatraHostExecutionScope | undefined => {
+			const handle = handleRef.current;
+			const activeTurn = handle?.activeTurn;
+			return handle && activeTurn
+				? { generation: activeTurn.generation, threadId: handle.threadId, turnId: activeTurn.turnId }
+				: undefined;
+		};
 		const session = await this.#sessionFactory({
 			agentDir: runtime.agentDir,
 			capability: runtime.capability,
@@ -2935,7 +2960,10 @@ export class EmpatraHostAgentRuntime implements EmpatraHostRuntime {
 								? { generation: activeTurn.generation, threadId, turnId: activeTurn.turnId }
 								: undefined;
 						},
-				  }),
+					  }),
+			...(this.#executionBrokerTransport === undefined
+				? {}
+				: { executionBroker: this.#executionBrokerTransport.broker, executionScope }),
 		});
 		const hostTools = this.#hostToolsConnection.createSession((): EmpatraHostToolScope | undefined => {
 			const handle = handleRef.current;
