@@ -257,6 +257,34 @@ describe("Empatra host thread projection", () => {
 				data: {
 					generation: 1,
 					payload: {
+						phase: "update",
+						toolCallId: "call-1",
+						toolName: "read",
+						update: {
+							changes: [{
+								diff: "@@ -1 +1 @@\\n-old\\n+new",
+								diffTruncated: false,
+								kind: "modify",
+								path: "src/main.ts",
+							}],
+							changesTruncated: false,
+							type: "changes_snapshot",
+						},
+					},
+					sequence: 3,
+					turnId: "turn-1",
+					version: 1,
+				},
+				id: "safe-update",
+				parentId: "safe-start",
+				timestamp: "2026-09-01T00:00:00.500Z",
+				type: "custom",
+			},
+			{
+				customType: "empatra.host.tool.v1",
+				data: {
+					generation: 1,
+					payload: {
 						argumentsText: '{"path":"src/main.ts","token":"[REDACTED]"}',
 						argumentsTruncated: false,
 						failed: false,
@@ -266,7 +294,7 @@ describe("Empatra host thread projection", () => {
 						toolCallId: "call-1",
 						toolName: "read",
 					},
-					sequence: 3,
+				sequence: 4,
 					turnId: "turn-1",
 					version: 1,
 				},
@@ -290,6 +318,13 @@ describe("Empatra host thread projection", () => {
 						toolName: "read",
 						toolResultText: "готово",
 						toolResultTruncated: false,
+						changes: [{
+							diff: "@@ -1 +1 @@\\n-old\\n+new",
+							diffTruncated: false,
+							kind: "modify",
+							path: "src/main.ts",
+						}],
+						changesTruncated: false,
 					},
 				],
 				id: "tool:turn-1:call-1",

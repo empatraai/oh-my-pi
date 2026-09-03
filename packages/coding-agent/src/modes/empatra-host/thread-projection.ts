@@ -4,6 +4,8 @@ import type {
 	EmpatraHostProjectedImageBlock,
 	EmpatraHostToolExecutionEndPayload,
 	EmpatraHostToolExecutionStartPayload,
+	EmpatraHostToolExecutionUpdatePayload,
+	EmpatraHostToolFileChange,
 } from "./protocol";
 import { EMPATRA_HOST_TOOL_ENTRY, parseEmpatraHostPersistedToolEvent } from "./tool-projection";
 import { parseEmpatraHostTurnMarker } from "./turn-marker";
@@ -27,7 +29,9 @@ export type EmpatraHostProjectedBlock =
 			toolName: string;
 			toolResultText: string;
 			toolResultTruncated: boolean;
-	  }>;
+			changes?: readonly EmpatraHostToolFileChange[];
+			changesTruncated?: boolean;
+	  	}>;
 
 export type EmpatraHostProjectedMessage = Readonly<{
 	blocks: readonly EmpatraHostProjectedBlock[];
@@ -41,6 +45,12 @@ export type EmpatraHostProjectedMessage = Readonly<{
 interface DurableToolState {
 	end?: Readonly<{ entry: SessionEntry; payload: EmpatraHostToolExecutionEndPayload }>;
 	start: Readonly<{ entry: SessionEntry; payload: EmpatraHostToolExecutionStartPayload }>;
+	changes?: Readonly<{
+		changes: readonly EmpatraHostToolFileChange[];
+		changesTruncated: boolean;
+		entry: SessionEntry;
+		payload: EmpatraHostToolExecutionUpdatePayload;
+	}>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -181,6 +191,14 @@ export function projectThreadMessages(entries: readonly SessionEntry[]): readonl
 		if (payload.toolName !== state.start.payload.toolName) {
 			throw new EmpatraHostProtocolError("turn_state_corrupt", "Persisted tool identity changed");
 		}
+		if (payload.phase === "update" && payload.update.type === "changes_snapshot") {
+			state.changes = {
+				changes: payload.update.changes,
+				changesTruncated: payload.update.changesTruncated,
+				entry,
+				payload,
+			};
+		}
 		if (payload.phase === "end") state.end = { entry, payload };
 	}
 
@@ -196,6 +214,8 @@ export function projectThreadMessages(entries: readonly SessionEntry[]): readonl
 		const completed = completedByEntry.get(entry.id);
 		if (completed) {
 			const payload = completed.end.payload;
+			const state = tools.get(`${completed.turnId}\0${payload.toolCallId}`);
+			const changes = state?.changes;
 			messages.push({
 				blocks: [
 					{
@@ -208,6 +228,9 @@ export function projectThreadMessages(entries: readonly SessionEntry[]): readonl
 						toolName: payload.toolName,
 						toolResultText: payload.resultText,
 						toolResultTruncated: payload.resultTruncated,
+						...(changes
+							? { changes: changes.changes, changesTruncated: changes.changesTruncated }
+							: {}),
 					},
 				],
 				id: `tool:${completed.turnId}:${payload.toolCallId}`,
