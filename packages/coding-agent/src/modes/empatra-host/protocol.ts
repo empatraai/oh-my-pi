@@ -81,6 +81,8 @@ export const EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY = "thread_lifecycle
 export const EMPATRA_HOST_NATIVE_PLAN_CAPABILITY = "plan.native-v1" as const;
 export const EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY = "approval.scoped-v1" as const;
 export const EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY = "host_tools.dynamic-v1" as const;
+/** Inline host-tool catalog admission for atomic lifecycle and turn start. */
+export const EMPATRA_HOST_INLINE_TOOL_CATALOG_CAPABILITY = "host_tools.inline-v1" as const;
 export const EMPATRA_HOST_IMAGE_INPUT_CAPABILITY = "images.input-v1" as const;
 export const EMPATRA_HOST_THREAD_GOALS_CAPABILITY = "goals.thread-v1" as const;
 export const EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY = "thread_read.turns-v2" as const;
@@ -111,6 +113,7 @@ export const EMPATRA_HOST_CAPABILITIES = [
 	EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
 	EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
 	EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
+	EMPATRA_HOST_INLINE_TOOL_CATALOG_CAPABILITY,
 	EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
 	EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
 	EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
@@ -253,6 +256,7 @@ export interface EmpatraHostThreadCreateCommand {
 }
 
 export interface EmpatraHostThreadCreateAndStartCommand extends Omit<EmpatraHostThreadCreateCommand, "type"> {
+	hostTools?: EmpatraHostToolCatalog;
 	images?: EmpatraHostImageDescriptor[];
 	message: string;
 	reasoningEffort?: EmpatraHostReasoningEffort | null;
@@ -271,6 +275,7 @@ export interface EmpatraHostThreadForkCommand {
 }
 
 export interface EmpatraHostThreadForkAndStartCommand extends Omit<EmpatraHostThreadForkCommand, "type"> {
+	hostTools?: EmpatraHostToolCatalog;
 	images?: EmpatraHostImageDescriptor[];
 	message: string;
 	reasoningEffort?: EmpatraHostReasoningEffort | null;
@@ -311,6 +316,11 @@ export interface EmpatraHostToolDefinition {
 	loadMode?: "discoverable" | "essential";
 	name: string;
 	parameters: Record<string, unknown>;
+}
+
+export interface EmpatraHostToolCatalog {
+	catalogRevision: string;
+	tools: EmpatraHostToolDefinition[];
 }
 
 export interface EmpatraHostToolsReplaceCommand {
@@ -461,6 +471,7 @@ export interface EmpatraHostThreadRenameCommand {
 export interface EmpatraHostTurnStartCommand {
 	approvalMode?: EmpatraHostApprovalMode;
 	expectedGeneration: number;
+	hostTools?: EmpatraHostToolCatalog;
 	id: string;
 	images?: EmpatraHostImageDescriptor[];
 	message: string;
@@ -1096,6 +1107,18 @@ function hostToolDefinition(value: unknown, index: number): EmpatraHostToolDefin
 	};
 }
 
+function optionalHostToolCatalog(value: unknown): EmpatraHostToolCatalog | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value) || !hasOnlyKeys(value, ["catalogRevision", "tools"]) || !Array.isArray(value.tools)
+		|| value.tools.length > EMPATRA_HOST_MAX_HOST_TOOLS) {
+		throw new EmpatraHostProtocolError("invalid_request", "hostTools is invalid");
+	}
+	return {
+		catalogRevision: catalogRevision(value.catalogRevision),
+		tools: value.tools.map(hostToolDefinition),
+	};
+}
+
 function jsonValue(value: unknown, depth = 0): unknown {
 	if (depth > 64) throw new EmpatraHostProtocolError("invalid_request", "JSON value is too deeply nested");
 	if (value === null || typeof value === "boolean" || typeof value === "string") return value;
@@ -1691,6 +1714,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					"cwd",
 					"id",
 					"images",
+					"hostTools",
 					"message",
 					"mode",
 					"modelId",
@@ -1705,11 +1729,13 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			}
 			{
 				const images = optionalImages(parsed.images);
+				const hostTools = optionalHostToolCatalog(parsed.hostTools);
 				return {
 					...(optionalApprovalMode(parsed.approvalMode) === undefined
 						? {}
 						: { approvalMode: optionalApprovalMode(parsed.approvalMode) }),
 					cwd: absolutePath(parsed.cwd, "cwd"),
+					...(hostTools ? { hostTools } : {}),
 					id,
 					...(images ? { images } : {}),
 					message: promptMessage(parsed.message, images),
@@ -1731,6 +1757,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					"cwd",
 					"id",
 					"images",
+					"hostTools",
 					"message",
 					"mode",
 					"operationId",
@@ -1744,11 +1771,13 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			}
 			{
 				const images = optionalImages(parsed.images);
+				const hostTools = optionalHostToolCatalog(parsed.hostTools);
 				return {
 					...(optionalApprovalMode(parsed.approvalMode) === undefined
 						? {}
 						: { approvalMode: optionalApprovalMode(parsed.approvalMode) }),
 					...(parsed.cwd === undefined ? {} : { cwd: absolutePath(parsed.cwd, "cwd") }),
+					...(hostTools ? { hostTools } : {}),
 					id,
 					...(images ? { images } : {}),
 					message: promptMessage(parsed.message, images),
@@ -1769,6 +1798,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 					"expectedGeneration",
 					"id",
 					"images",
+					"hostTools",
 					"message",
 					"mode",
 					"modelId",
@@ -1783,6 +1813,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 			}
 			{
 				const images = optionalImages(parsed.images);
+				const hostTools = optionalHostToolCatalog(parsed.hostTools);
 				return {
 					...(optionalApprovalMode(parsed.approvalMode) === undefined
 						? {}
@@ -1794,6 +1825,7 @@ export function parseEmpatraHostCommand(frame: string): EmpatraHostCommand {
 						Number.MAX_SAFE_INTEGER,
 					),
 					id,
+					...(hostTools ? { hostTools } : {}),
 					...(images ? { images } : {}),
 					message: promptMessage(parsed.message, images),
 					...(optionalMode(parsed.mode) === undefined ? {} : { mode: optionalMode(parsed.mode) }),

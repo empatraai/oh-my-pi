@@ -5,6 +5,7 @@ import {
 	EMPATRA_HOST_ATOMIC_THREAD_LIFECYCLE_CAPABILITY,
 	EMPATRA_HOST_CAPABILITIES,
 	EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
+	EMPATRA_HOST_INLINE_TOOL_CATALOG_CAPABILITY,
 	EMPATRA_HOST_EXPLICIT_EXTENSIONS_CAPABILITY,
 	EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
 	EMPATRA_HOST_IMAGE_GENERATION_CAPABILITY,
@@ -65,6 +66,7 @@ describe("Empatra host protocol", () => {
 			EMPATRA_HOST_NATIVE_PLAN_CAPABILITY,
 			EMPATRA_HOST_SCOPED_APPROVAL_CAPABILITY,
 			EMPATRA_HOST_DYNAMIC_TOOLS_CAPABILITY,
+			EMPATRA_HOST_INLINE_TOOL_CATALOG_CAPABILITY,
 			EMPATRA_HOST_IMAGE_INPUT_CAPABILITY,
 			EMPATRA_HOST_THREAD_GOALS_CAPABILITY,
 			EMPATRA_HOST_THREAD_READ_TURNS_V2_CAPABILITY,
@@ -495,6 +497,25 @@ describe("Empatra host protocol", () => {
 				}),
 			),
 		).toMatchObject({ operationId: "operation-atomic-1", type: "thread_create_and_start" });
+		const inlineCatalog = {
+			catalogRevision: `sha256:${"a".repeat(64)}`,
+			tools: [{ description: "Проверка", name: "apply_patch", parameters: { type: "object" } }],
+		};
+		expect(
+			parseEmpatraHostCommand(
+				JSON.stringify({
+					cwd: "/tmp/workspace",
+					hostTools: inlineCatalog,
+					id: "atomic-create-inline",
+					message: "С inline catalog",
+					modelId: "managed-model",
+					operationId: "operation-inline",
+					systemPrompt: "System",
+					turnId: "turn-inline",
+					type: "thread_create_and_start",
+				}),
+			),
+		).toMatchObject({ hostTools: inlineCatalog, type: "thread_create_and_start" });
 		expect(
 			parseEmpatraHostCommand(
 				JSON.stringify({
