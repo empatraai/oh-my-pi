@@ -5,6 +5,9 @@ import { EMPATRA_HOST_RESOURCES_CAPABILITY } from "./protocol";
 
 /** Versioned main-owned resource catalog contract. */
 export const EMPATRA_HOST_RESOURCES_VERSION = 1 as const;
+/** Launch opt-in for the stdio bridge; unset hosts never emit resource events. */
+export const EMPATRA_HOST_RESOURCES_RPC_OPT_IN_ENV = "EMPATRA_OMP_RESOURCES_RPC" as const;
+export const EMPATRA_HOST_RESOURCES_RPC_OPT_IN_VALUE = "v1" as const;
 export const EMPATRA_HOST_RESOURCES_MAX_URI_BYTES = 4096;
 export const EMPATRA_HOST_RESOURCES_MAX_NAME_BYTES = 512;
 export const EMPATRA_HOST_RESOURCES_MAX_DESCRIPTION_BYTES = 8192;

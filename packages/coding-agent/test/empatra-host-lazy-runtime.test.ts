@@ -11,6 +11,10 @@ import {
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	type EmpatraHostSubagentRunner,
 } from "../src/modes/empatra-host/subagent-broker";
+import {
+	type EmpatraHostResourcesBrokerTransport,
+} from "../src/modes/empatra-host/resources";
+import { EMPATRA_HOST_RESOURCES_CAPABILITY } from "../src/modes/empatra-host/protocol";
 
 const initializeCommand: EmpatraHostInitializeCommand = {
 	capability: "c".repeat(48),
@@ -92,5 +96,32 @@ describe("LazyEmpatraHostRuntime", () => {
 
 		expect(injected.getAdvertisedCapabilities()).toContain(EMPATRA_HOST_SUBAGENT_CAPABILITY);
 		expect(defaultRuntime.getAdvertisedCapabilities()).not.toContain(EMPATRA_HOST_SUBAGENT_CAPABILITY);
+	});
+
+	test("forwards an explicitly injected resources transport without serializing it", async () => {
+		const resourcesTransport = {
+			broker: { capability: EMPATRA_HOST_RESOURCES_CAPABILITY },
+			handleResponse: () => undefined,
+			dispose: () => undefined,
+		} as unknown as EmpatraHostResourcesBrokerTransport;
+		let receivedTransport: EmpatraHostResourcesBrokerTransport | undefined;
+		const runtime = {
+			dispose: async () => undefined,
+			initialize: async () => ({ modelCount: 0, workspaceRootCount: 1 }),
+			setEventSink: () => undefined,
+			setHostToolSink: () => undefined,
+			handleResourcesResponse: () => undefined,
+		} as unknown as EmpatraHostRuntime;
+		const lazy = new LazyEmpatraHostRuntime(
+			async options => {
+				receivedTransport = options.resourcesTransport;
+				return runtime;
+			},
+			{ resourcesTransport },
+		);
+
+		expect(lazy.getAdvertisedCapabilities()).toContain(EMPATRA_HOST_RESOURCES_CAPABILITY);
+		await lazy.initialize(initializeCommand);
+		expect(receivedTransport).toBe(resourcesTransport);
 	});
 });

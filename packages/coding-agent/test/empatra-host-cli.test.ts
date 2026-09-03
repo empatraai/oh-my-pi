@@ -4,10 +4,15 @@ import * as path from "node:path";
 
 import {
 	EMPATRA_HOST_CAPABILITIES,
+	EMPATRA_HOST_FRAMING_CAPABILITY,
+	EMPATRA_HOST_RESOURCES_CAPABILITY,
+	EMPATRA_HOST_RESOURCES_RPC_OPT_IN_ENV,
+	EMPATRA_HOST_RESOURCES_RPC_OPT_IN_VALUE,
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
 	EMPATRA_HOST_SUBAGENT_RPC_OPT_IN_ENV,
 	EMPATRA_HOST_SUBAGENT_RPC_OPT_IN_VALUE,
 } from "../src/modes/empatra-host";
+import { isEmpatraHostResourcesRpcOptedIn } from "../src/modes/empatra-host/cli";
 
 const temporaryRoots: string[] = [];
 const compiledHostBinary = Bun.env.EMPATRA_HOST_BINARY;
@@ -32,6 +37,61 @@ afterEach(async () => {
 });
 
 describe("standalone Empatra OMP host entry", () => {
+	test("keeps main-owned resources opt-in explicit", () => {
+		expect(isEmpatraHostResourcesRpcOptedIn({})).toBe(false);
+		expect(isEmpatraHostResourcesRpcOptedIn({
+			[EMPATRA_HOST_RESOURCES_RPC_OPT_IN_ENV]: EMPATRA_HOST_RESOURCES_RPC_OPT_IN_VALUE,
+		})).toBe(true);
+		expect(isEmpatraHostResourcesRpcOptedIn({
+			[EMPATRA_HOST_RESOURCES_RPC_OPT_IN_ENV]: "1",
+		})).toBe(false);
+		expect(EMPATRA_HOST_RESOURCES_CAPABILITY).toBe("resources.main-owned-v1");
+	});
+
+	test("advertises resources only after launch opt-in", async () => {
+		const host = await temporaryHost();
+		const child = Bun.spawn({
+			cmd: hostCommand(),
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			env: { ...process.env, [EMPATRA_HOST_RESOURCES_RPC_OPT_IN_ENV]: EMPATRA_HOST_RESOURCES_RPC_OPT_IN_VALUE },
+			stderr: "pipe",
+			stdin: "pipe",
+			stdout: "pipe",
+		});
+		const initialize = {
+			capability: "c".repeat(48),
+			gatewayBaseUrl: "http://127.0.0.1:43123/v1",
+			id: "initialize-resources-1",
+			models: [{
+				api: "openai-responses",
+				contextWindow: 200_000,
+				id: "managed-model",
+				input: ["text"],
+				maxTokens: 32_000,
+				name: "Managed Model",
+				reasoning: true,
+				supportsTools: true,
+			}],
+			protocolVersion: 6,
+			sessionDirectory: host.sessions,
+			type: "host_initialize",
+			workspaceRoots: [host.workspace],
+		};
+		child.stdin.write(`${JSON.stringify(initialize)}\n${JSON.stringify({ id: "shutdown-resources-1", type: "host_shutdown" })}\n`);
+		await child.stdin.end();
+		const [exitCode, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		const frames = stdout.trim().split("\n").map(frame => JSON.parse(frame));
+		expect(frames[0].capabilities).toContain(EMPATRA_HOST_RESOURCES_CAPABILITY);
+		expect(frames.find(frame => frame.id === "initialize-resources-1")).toMatchObject({ success: true });
+		expect(frames.find(frame => frame.id === "shutdown-resources-1")).toMatchObject({ success: true });
+	});
+
 	test("bootstraps only from stdin and exits through the correlated shutdown command", async () => {
 		const host = await temporaryHost();
 		const child = Bun.spawn({
@@ -81,7 +141,7 @@ describe("standalone Empatra OMP host entry", () => {
 			.split("\n")
 			.map(frame => JSON.parse(frame));
 		expect(frames[0]).toMatchObject({
-			capabilities: EMPATRA_HOST_CAPABILITIES,
+			capabilities: [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_FRAMING_CAPABILITY],
 			protocolVersion: 6,
 			type: "host_ready",
 		});
@@ -157,7 +217,7 @@ describe("standalone Empatra OMP host entry", () => {
 			.split("\n")
 			.map(frame => JSON.parse(frame));
 		expect(frames[0]).toMatchObject({
-			capabilities: [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY],
+			capabilities: [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY, EMPATRA_HOST_FRAMING_CAPABILITY],
 			type: "host_ready",
 		});
 		expect(frames.find(frame => frame.id === "initialize-subagent-1")).toMatchObject({ success: true });
@@ -209,7 +269,7 @@ describe("standalone Empatra OMP host entry", () => {
 			.trim()
 			.split("\n")
 			.map(frame => JSON.parse(frame));
-		expect(frames[0].capabilities).toEqual(EMPATRA_HOST_CAPABILITIES);
+		expect(frames[0].capabilities).toEqual([...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_FRAMING_CAPABILITY]);
 		expect(frames.find(frame => frame.id === "initialize-subagent-mismatch-1")).toMatchObject({
 			code: "subagent_unavailable",
 			success: false,

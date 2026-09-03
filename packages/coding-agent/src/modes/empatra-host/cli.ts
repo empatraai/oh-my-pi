@@ -1,7 +1,12 @@
 import { claimRpcInput } from "../rpc/rpc-input";
 import { LazyEmpatraHostRuntime, type EmpatraHostRuntimeFactoryOptions } from "./lazy-runtime";
-import { serializeEmpatraHostFrame } from "./protocol";
+import { EMPATRA_HOST_RESOURCES_CAPABILITY, serializeEmpatraHostFrame } from "./protocol";
 import { runEmpatraHostServer } from "./server";
+import {
+	createEmpatraHostResourcesBrokerTransport,
+	EMPATRA_HOST_RESOURCES_RPC_OPT_IN_ENV,
+	EMPATRA_HOST_RESOURCES_RPC_OPT_IN_VALUE,
+} from "./resources";
 import {
 	createEmpatraHostSubagentRpcTransport,
 	EMPATRA_HOST_SUBAGENT_CAPABILITY,
@@ -13,6 +18,12 @@ export function isEmpatraHostSubagentRpcOptedIn(
 	environment: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean {
 	return environment[EMPATRA_HOST_SUBAGENT_RPC_OPT_IN_ENV] === EMPATRA_HOST_SUBAGENT_RPC_OPT_IN_VALUE;
+}
+
+export function isEmpatraHostResourcesRpcOptedIn(
+	environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+	return environment[EMPATRA_HOST_RESOURCES_RPC_OPT_IN_ENV] === EMPATRA_HOST_RESOURCES_RPC_OPT_IN_VALUE;
 }
 
 /**
@@ -41,17 +52,31 @@ export async function runEmpatraHostCli(options: EmpatraHostRuntimeFactoryOption
 				capabilities: [EMPATRA_HOST_SUBAGENT_CAPABILITY],
 				emitEvent: async event => write(serializeEmpatraHostFrame(event)),
 			});
+	const resourcesTransport =
+		options.resourcesTransport || !isEmpatraHostResourcesRpcOptedIn()
+			? undefined
+			: createEmpatraHostResourcesBrokerTransport({
+				capabilities: [EMPATRA_HOST_RESOURCES_CAPABILITY],
+				emitRequest: async event => write(serializeEmpatraHostFrame(event)),
+			});
 	try {
 		await runEmpatraHostServer({
 			input: claimRpcInput(),
 			runtime: new LazyEmpatraHostRuntime(
 				undefined,
-				transport ? { ...options, subagentRpcTransport: transport } : options,
+				transport || resourcesTransport
+					? {
+						...options,
+						...(transport ? { subagentRpcTransport: transport } : {}),
+						...(resourcesTransport ? { resourcesTransport } : {}),
+					}
+					: options,
 			),
 			write,
 		});
 	} finally {
 		transport?.dispose();
+		resourcesTransport?.dispose();
 		await writeTail;
 	}
 }

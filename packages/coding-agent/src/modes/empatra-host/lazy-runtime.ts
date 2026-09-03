@@ -17,6 +17,10 @@ import type {
 	EmpatraHostSubagentSteerCommand,
 } from "./subagent-broker";
 import type { EmpatraHostRuntime } from "./server";
+import type {
+	EmpatraHostResourcesBrokerTransport,
+	EmpatraHostResourcesResponseCommand,
+} from "./resources";
 
 export interface EmpatraHostRuntimeFactoryOptions {
 	/**
@@ -25,6 +29,8 @@ export interface EmpatraHostRuntimeFactoryOptions {
 	 */
 	readonly subagentRunner?: EmpatraHostSubagentRunner;
 	readonly subagentRpcTransport?: EmpatraHostSubagentRpcTransport;
+	/** Main-owned resource broker transport; absent unless explicitly opted in. */
+	readonly resourcesTransport?: EmpatraHostResourcesBrokerTransport;
 }
 
 type RuntimeFactory = (options: EmpatraHostRuntimeFactoryOptions) => Promise<EmpatraHostRuntime>;
@@ -61,8 +67,17 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 		// Reflect only explicitly injected seams here; the default CLI remains
 		// fail-closed and does not advertise a capability it cannot serve.
 		return this.#runtimeOptions.subagentRunner || this.#runtimeOptions.subagentRpcTransport
-			? [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_SUBAGENT_CAPABILITY, EMPATRA_HOST_FRAMING_CAPABILITY]
-			: [...EMPATRA_HOST_CAPABILITIES, EMPATRA_HOST_FRAMING_CAPABILITY];
+			? [
+					...EMPATRA_HOST_CAPABILITIES,
+					EMPATRA_HOST_SUBAGENT_CAPABILITY,
+					EMPATRA_HOST_FRAMING_CAPABILITY,
+					...(this.#runtimeOptions.resourcesTransport ? [this.#runtimeOptions.resourcesTransport.broker.capability] : []),
+				]
+			: [
+					...EMPATRA_HOST_CAPABILITIES,
+					EMPATRA_HOST_FRAMING_CAPABILITY,
+					...(this.#runtimeOptions.resourcesTransport ? [this.#runtimeOptions.resourcesTransport.broker.capability] : []),
+				];
 	}
 
 	spawnSubagent(command: EmpatraHostSubagentSpawnCommand): Promise<unknown> {
@@ -160,6 +175,12 @@ export class LazyEmpatraHostRuntime implements EmpatraHostRuntime {
 
 	handleExecutionBrokerResponse(command: Extract<EmpatraHostCommand, { type: "execution_broker_response" }>): void {
 		this.#requireRuntime().handleExecutionBrokerResponse(command);
+	}
+
+	handleResourcesResponse(command: EmpatraHostResourcesResponseCommand): void {
+		const runtime = this.#requireRuntime();
+		if (!runtime.handleResourcesResponse) throw new Error("Resource broker transport is unavailable");
+		runtime.handleResourcesResponse(command);
 	}
 
 	interruptTurn(command: Extract<EmpatraHostCommand, { type: "turn_interrupt" }>): Promise<unknown> {
