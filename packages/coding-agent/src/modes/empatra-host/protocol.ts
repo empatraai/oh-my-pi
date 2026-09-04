@@ -156,6 +156,7 @@ const EMPATRA_HOST_ADVERTISED_CAPABILITY_SET = new Set<string>([
 	EMPATRA_HOST_FRAMING_CAPABILITY,
 	EMPATRA_HOST_MCP_OAUTH_CAPABILITY,
 	EMPATRA_HOST_RESOURCES_CAPABILITY,
+	EMPATRA_HOST_EXECUTION_BROKER_CAPABILITY,
 	EMPATRA_HOST_MODEL_ROUTING_CAPABILITY,
 ]);
 
@@ -932,7 +933,7 @@ function parseEmpatraHostAdvertisedCapability(value: unknown): EmpatraHostAdvert
  * unknown names and duplicate claims fail closed.
  */
 export function parseEmpatraHostCapabilities(value: unknown): readonly EmpatraHostAdvertisedCapability[] {
-	if (!Array.isArray(value) || value.length > EMPATRA_HOST_CAPABILITIES.length + 4) {
+	if (!Array.isArray(value) || value.length > EMPATRA_HOST_ADVERTISED_CAPABILITY_SET.size) {
 		throw new EmpatraHostProtocolError("invalid_request", "host capabilities are invalid");
 	}
 	const capabilities = value.map(parseEmpatraHostAdvertisedCapability);
